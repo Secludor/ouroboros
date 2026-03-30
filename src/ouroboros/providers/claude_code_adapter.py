@@ -35,6 +35,7 @@ from pathlib import Path
 import structlog
 
 from ouroboros.core.errors import ProviderError
+from ouroboros.core.json_utils import extract_json_payload
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -48,6 +49,7 @@ log = structlog.get_logger(__name__)
 
 # Retry configuration for transient API errors
 _MAX_RETRIES = 5
+_MAX_JSON_RETRIES = 3  # Extra retries when response_format requires JSON but LLM returns prose
 _INITIAL_BACKOFF_SECONDS = 2.0  # Increased for custom CLI startup
 _RETRYABLE_ERROR_PATTERNS = (
     "concurrency",
@@ -244,7 +246,11 @@ class ClaudeCodeAdapter:
         # output. When callers request a schema, reinforce the requirement in the
         # prompt text and let downstream parsers extract JSON from the plain-text
         # response rather than depending on SDK-level structured_output.
-        if config.response_format and config.response_format.get("type") == "json_schema":
+        requires_json = bool(
+            config.response_format
+            and config.response_format.get("type") in ("json_schema", "json_object")
+        )
+        if requires_json and config.response_format.get("type") == "json_schema":
             schema = config.response_format.get("json_schema", {})
             schema_instruction = (
                 "Respond with ONLY a valid JSON object that matches this schema. "
@@ -269,6 +275,39 @@ class ClaudeCodeAdapter:
             has_system_prompt=system_prompt is not None,
         )
 
+        result = await self._complete_with_transient_retry(prompt, config, system_prompt)
+
+        # JSON enforcement layer: if response_format requires JSON but the
+        # CLI returned prose, retry independently of transient-error retries.
+        if requires_json and result.is_ok and not extract_json_payload(result.value.content):
+            log.warning(
+                "claude_code_adapter.json_not_found",
+                max_json_retries=_MAX_JSON_RETRIES,
+                response_preview=result.value.content[:120],
+            )
+            for json_attempt in range(1, _MAX_JSON_RETRIES + 1):
+                log.info(
+                    "claude_code_adapter.json_retry",
+                    attempt=json_attempt,
+                    max_json_retries=_MAX_JSON_RETRIES,
+                )
+                result = await self._complete_with_transient_retry(prompt, config, system_prompt)
+                if result.is_err or extract_json_payload(result.value.content):
+                    break
+
+        return result
+
+    async def _complete_with_transient_retry(
+        self,
+        prompt: str,
+        config: CompletionConfig,
+        system_prompt: str | None,
+    ) -> Result[CompletionResponse, ProviderError]:
+        """Inner retry loop for transient API errors (rate limits, timeouts, etc.).
+
+        This handles infrastructure-level failures only. JSON format
+        enforcement is handled by the caller.
+        """
         last_error: ProviderError | None = None
 
         for attempt in range(_MAX_RETRIES):

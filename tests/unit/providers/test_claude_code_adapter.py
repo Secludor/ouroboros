@@ -243,8 +243,9 @@ class TestExecuteSingleRequestSystemPrompt:
             },
         )
 
-        mock_execute = AsyncMock()
-        mock_execute.return_value = MagicMock(is_ok=True)
+        mock_response = MagicMock(is_ok=True, is_err=False)
+        mock_response.value.content = '{"score": 0.9}'
+        mock_execute = AsyncMock(return_value=mock_response)
         adapter._execute_single_request = mock_execute
 
         with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
@@ -253,6 +254,62 @@ class TestExecuteSingleRequestSystemPrompt:
         prompt_arg = mock_execute.call_args.args[0]
         assert "Respond with ONLY a valid JSON object" in prompt_arg
         assert '"score"' in prompt_arg
+
+    @pytest.mark.asyncio
+    async def test_json_retry_on_prose_response(self) -> None:
+        """When response_format requires JSON but LLM returns prose, adapter retries."""
+        adapter = ClaudeCodeAdapter()
+        messages = [Message(role=MessageRole.USER, content="Evaluate this")]
+        config = CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"type": "object", "properties": {"score": {"type": "number"}}},
+            },
+        )
+
+        prose_response = MagicMock(is_ok=True, is_err=False)
+        prose_response.value.content = "Let me verify the acceptance criteria..."
+
+        json_response = MagicMock(is_ok=True, is_err=False)
+        json_response.value.content = '{"score": 0.85}'
+
+        mock_execute = AsyncMock(side_effect=[prose_response, json_response])
+        adapter._execute_single_request = mock_execute
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
+            result = await adapter.complete(messages, config)
+
+        assert result.is_ok
+        assert result.value.content == '{"score": 0.85}'
+        assert mock_execute.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_json_retry_exhausted_returns_last_prose(self) -> None:
+        """When all JSON retries fail, return the last prose response."""
+        adapter = ClaudeCodeAdapter()
+        messages = [Message(role=MessageRole.USER, content="Evaluate this")]
+        config = CompletionConfig(
+            model="claude-sonnet-4-6",
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"type": "object", "properties": {"score": {"type": "number"}}},
+            },
+        )
+
+        prose_response = MagicMock(is_ok=True, is_err=False)
+        prose_response.value.content = "I cannot produce JSON right now"
+
+        # 1 initial + 3 retries = 4 calls total
+        mock_execute = AsyncMock(return_value=prose_response)
+        adapter._execute_single_request = mock_execute
+
+        with patch.dict("sys.modules", {"claude_agent_sdk": MagicMock()}):
+            result = await adapter.complete(messages, config)
+
+        assert result.is_ok
+        assert result.value.content == "I cannot produce JSON right now"
+        assert mock_execute.call_count == 4  # 1 initial + 3 retries
 
     @pytest.mark.asyncio
     async def test_execute_single_request_omits_output_format(self) -> None:
