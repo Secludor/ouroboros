@@ -134,12 +134,21 @@ KEYWORD_MAP = [
 
 
 def is_mcp_configured() -> bool:
-    """Check if MCP server is registered in ~/.claude/mcp.json."""
+    """Check if MCP server is registered in any supported runtime config."""
     try:
-        mcp_path = Path.home() / ".claude" / "mcp.json"
-        if not mcp_path.exists():
-            return False
-        return "ouroboros" in mcp_path.read_text()
+        # Claude Code
+        claude_path = Path.home() / ".claude" / "mcp.json"
+        if claude_path.exists() and "ouroboros" in claude_path.read_text():
+            return True
+        # Cursor
+        cursor_path = Path.home() / ".cursor" / "mcp.json"
+        if cursor_path.exists() and "ouroboros" in cursor_path.read_text():
+            return True
+        # Codex
+        codex_path = Path.home() / ".codex" / "config.toml"
+        if codex_path.exists() and "ouroboros" in codex_path.read_text():
+            return True
+        return False
     except Exception:
         return False
 
@@ -200,9 +209,9 @@ def main() -> None:
         print(f"""{user_input}
 
 <skill-suggestion>
-🎯 MATCHED SKILLS (use AskUserQuestion to let user choose):
+🎯 MATCHED SKILLS (use the structured question UI tool — AskUserQuestion on Claude Code, AskQuestion on Cursor — to let the user choose):
 - /ouroboros:{skill_name} - First time using Ouroboros! Starting welcome experience.
-IMPORTANT: Auto-triggering welcome experience now. Use AskUserQuestion to confirm or skip.
+IMPORTANT: Auto-triggering welcome experience now. Use the structured question UI tool to confirm or skip.
 </skill-suggestion>
 """)
         return
