@@ -10,7 +10,9 @@ from ouroboros.config.loader import _load_env_file
 
 def test_load_env_file_sets_missing_values(tmp_path: Path, monkeypatch) -> None:
     env_file = tmp_path / ".env"
-    env_file.write_text("export FIRST=value\nSECOND='two words'\nTHIRD=three # trailing comment\n")
+    env_file.write_text(
+        "export FIRST=value\nSECOND='two words'\nTHIRD=three # trailing comment\n"
+    )
 
     monkeypatch.delenv("FIRST", raising=False)
     monkeypatch.delenv("SECOND", raising=False)
