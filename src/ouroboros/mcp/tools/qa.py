@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import re
+import traceback
 from typing import Any
 import uuid
 
@@ -603,10 +604,12 @@ class QAHandler:
             )
 
         except Exception as e:
-            log.error("mcp.tool.qa.error", error=str(e))
+            tb = traceback.format_exc()
+            error_msg = f"{e}\n\nTraceback:\n{tb}"
+            log.error("mcp.tool.qa.error", error=str(e), traceback=tb)
             return Result.err(
                 MCPToolError(
-                    f"QA evaluation failed: {e}",
+                    f"QA evaluation failed: {error_msg}",
                     tool_name="ouroboros_qa",
                 )
             )

@@ -8,6 +8,7 @@ Contains handlers for drift measurement, evaluation, and lateral thinking tools:
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import traceback
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
@@ -472,10 +473,12 @@ class EvaluateHandler:
                 )
             )
         except Exception as e:
-            log.error("mcp.tool.evaluate.error", error=str(e))
+            tb = traceback.format_exc()
+            error_msg = f"{e}\n\nTraceback:\n{tb}"
+            log.error("mcp.tool.evaluate.error", error=str(e), traceback=tb)
             return Result.err(
                 MCPToolError(
-                    f"Evaluation failed: {e}",
+                    f"Evaluation failed: {error_msg}",
                     tool_name="ouroboros_evaluate",
                 )
             )
