@@ -38,7 +38,7 @@ from typing import Any
 import structlog
 
 from ouroboros.core.errors import ProviderError
-from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH
+from ouroboros.core.security import MAX_LLM_RESPONSE_LENGTH, InputValidator
 from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
@@ -74,6 +74,9 @@ _DEFAULT_MODEL = "gemini-2.5-flash"
 
 # Maximum response size to guard against runaway output
 _MAX_RESPONSE_BYTES = MAX_LLM_RESPONSE_LENGTH
+
+# Guard against recursive ouroboros invocations
+_MAX_OUROBOROS_DEPTH = 5
 
 
 class GeminiCLIAdapter:
@@ -413,6 +416,17 @@ class GeminiCLIAdapter:
                 )
             )
 
+        # Validate and truncate oversized responses
+        is_valid, _ = InputValidator.validate_llm_response(content)
+        if not is_valid:
+            log.warning(
+                "llm.response.truncated",
+                model=model_name or self._model,
+                original_length=len(content),
+                max_length=MAX_LLM_RESPONSE_LENGTH,
+            )
+            content = content[:MAX_LLM_RESPONSE_LENGTH]
+
         log.info(
             "gemini_cli_adapter.request_completed",
             content_length=len(content),
@@ -508,13 +522,32 @@ class GeminiCLIAdapter:
     def _build_env(self) -> dict[str, str]:
         """Build the environment for the subprocess.
 
-        Returns a copy of the current environment.  Subclasses may override
-        this to inject additional variables (e.g. ``GEMINI_API_KEY``).
+        Returns a copy of the current environment with recursion-depth
+        tracking.  Raises :class:`ProviderError` if the maximum nesting
+        depth is exceeded.
 
         Returns:
             Environment dictionary for the subprocess.
+
+        Raises:
+            ProviderError: If ``_OUROBOROS_DEPTH`` exceeds the limit.
         """
-        return dict(os.environ)
+        env = os.environ.copy()
+        # Strip vars that could trigger recursive ouroboros startup
+        for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
+            env.pop(key, None)
+        try:
+            depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
+        except (ValueError, TypeError):
+            depth = 1
+        if depth > _MAX_OUROBOROS_DEPTH:
+            raise ProviderError(
+                message=f"Maximum Ouroboros nesting depth ({_MAX_OUROBOROS_DEPTH}) exceeded",
+                provider=self._provider_name,
+                details={"depth": depth},
+            )
+        env["_OUROBOROS_DEPTH"] = str(depth)
+        return env
 
     def _resolve_model(self, config_model: str) -> str:
         """Select the effective Gemini model name.

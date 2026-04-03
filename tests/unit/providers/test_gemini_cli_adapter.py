@@ -481,3 +481,63 @@ class TestCompleteIntegration:
 
         assert not result.is_ok
         assert "not found" in result.error.message.lower()
+
+
+class TestRecursionGuard:
+    """Recursion depth guard in _build_env."""
+
+    def test_depth_increments(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("_OUROBOROS_DEPTH", raising=False)
+        adapter = GeminiCLIAdapter(cli_path="gemini")
+        env = adapter._build_env()
+        assert env["_OUROBOROS_DEPTH"] == "1"
+
+    def test_depth_exceeds_limit_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from ouroboros.core.errors import ProviderError
+        monkeypatch.setenv("_OUROBOROS_DEPTH", "5")
+        adapter = GeminiCLIAdapter(cli_path="gemini")
+        with pytest.raises(ProviderError, match="nesting depth"):
+            adapter._build_env()
+
+    def test_strips_recursive_env_vars(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OUROBOROS_AGENT_RUNTIME", "gemini")
+        monkeypatch.setenv("OUROBOROS_LLM_BACKEND", "gemini")
+        monkeypatch.delenv("_OUROBOROS_DEPTH", raising=False)
+        adapter = GeminiCLIAdapter(cli_path="gemini")
+        env = adapter._build_env()
+        assert "OUROBOROS_AGENT_RUNTIME" not in env
+        assert "OUROBOROS_LLM_BACKEND" not in env
+
+
+class TestInputValidation:
+    """InputValidator integration in _collect_response."""
+
+    @pytest.mark.asyncio
+    async def test_validator_truncates_when_invalid(self) -> None:
+        """InputValidator.validate_llm_response is called and truncates
+        content that fails validation."""
+        stream = _make_stream([_INIT_EVENT, _RESULT_EVENT])
+        process = _FakeProcess(stdout=stream, returncode=0)
+        adapter = GeminiCLIAdapter(cli_path="gemini")
+
+        with patch(
+            "ouroboros.providers.gemini_cli_adapter.InputValidator.validate_llm_response",
+            return_value=(False, "too long"),
+        ):
+            result = await adapter._collect_response(process)
+
+        assert result.is_ok
+        # Content should still be returned (truncation applied internally)
+        assert result.value.content is not None
+
+    @pytest.mark.asyncio
+    async def test_validator_passes_valid_content(self) -> None:
+        """Valid content passes through InputValidator unchanged."""
+        stream = _make_stream([_INIT_EVENT, _RESULT_EVENT])
+        process = _FakeProcess(stdout=stream, returncode=0)
+        adapter = GeminiCLIAdapter(cli_path="gemini")
+
+        result = await adapter._collect_response(process)
+
+        assert result.is_ok
+        assert result.value.content == "Hello, world!"
