@@ -11,10 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from ouroboros.core.types import Result
 from ouroboros.providers.base import (
     CompletionConfig,
+    CompletionResponse,
     Message,
     MessageRole,
+    UsageInfo,
 )
 from ouroboros.providers.claude_code_adapter import ClaudeCodeAdapter
 
@@ -336,6 +339,29 @@ class TestExecuteSingleRequestSystemPrompt:
         assert result.is_ok
         assert result.value.content == '{"score": 0.85}'
         assert mock_execute.call_count == 1  # No retry needed
+
+    def test_normalize_json_content_rebuilds_frozen_completion_response(self) -> None:
+        """Normalization must not mutate the frozen CompletionResponse dataclass."""
+        adapter = ClaudeCodeAdapter()
+        response = CompletionResponse(
+            content='Here is the result:\n{"score": 0.85}\nDone.',
+            model="claude-sonnet-4-6",
+            usage=UsageInfo(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            finish_reason="stop",
+            raw_response={"id": "resp_123"},
+        )
+
+        result = adapter._normalize_json_content(Result.ok(response))
+
+        assert result is not None
+        assert result.is_ok
+        assert result.value.content == '{"score": 0.85}'
+        assert result.value is not response
+        assert response.content == 'Here is the result:\n{"score": 0.85}\nDone.'
+        assert result.value.model == response.model
+        assert result.value.usage == response.usage
+        assert result.value.finish_reason == response.finish_reason
+        assert result.value.raw_response == response.raw_response
 
     @pytest.mark.asyncio
     async def test_json_schema_array_gets_correct_prompt_steering(self) -> None:
