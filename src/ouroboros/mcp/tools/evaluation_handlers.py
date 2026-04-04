@@ -399,17 +399,6 @@ class EvaluateHandler:
             # Use acceptance_criterion or derive from seed
             current_ac = acceptance_criterion or "Verify execution output meets requirements"
 
-            context = EvaluationContext(
-                execution_id=session_id,
-                seed_id=seed_id,
-                current_ac=current_ac,
-                artifact=artifact,
-                artifact_type=artifact_type,
-                goal=goal,
-                constraints=constraints,
-                trigger_consensus=trigger_consensus,
-            )
-
             # Use injected or create services.
             # Evaluation reads multiple spec files (one Read call per AC), so
             # max_turns must be well above 1.
@@ -419,6 +408,24 @@ class EvaluateHandler:
             )
             working_dir_str = arguments.get("working_dir")
             working_dir = Path(working_dir_str).resolve() if working_dir_str else Path.cwd()
+
+            # Collect file-based artifacts for richer semantic evaluation.
+            # working_dir is used as the project root for artifact resolution.
+            from ouroboros.evaluation.artifact_collector import ArtifactCollector
+
+            artifact_bundle = ArtifactCollector().collect(artifact, str(working_dir))
+
+            context = EvaluationContext(
+                execution_id=session_id,
+                seed_id=seed_id,
+                current_ac=current_ac,
+                artifact=artifact,
+                artifact_type=artifact_type,
+                goal=goal,
+                constraints=constraints,
+                trigger_consensus=trigger_consensus,
+                artifact_bundle=artifact_bundle,
+            )
             mechanical_config = build_mechanical_config(working_dir)
             config = PipelineConfig(
                 mechanical=mechanical_config,
