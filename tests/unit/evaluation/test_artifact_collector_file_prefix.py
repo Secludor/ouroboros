@@ -73,3 +73,25 @@ class TestLooksLikeProjectRoot:
     def test_rejects_empty_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             assert _looks_like_project_root(Path(tmpdir)) is False
+
+
+class TestProjectDirFromArtifactQuotedPaths:
+    """_project_dir_from_artifact should handle quoted paths with spaces."""
+
+    def test_quoted_path_with_spaces(self) -> None:
+        """File: with a quoted path containing spaces should be parsed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project = Path(tmpdir) / "my project"
+            project.mkdir()
+            (project / ".git").mkdir()
+            artifact = f'File: "{project}/main.py"'
+            result = _project_dir_from_artifact(artifact)
+            assert result == str(project)
+
+    def test_unquoted_path_without_spaces(self) -> None:
+        """Unquoted paths without spaces should still work."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / ".git").mkdir()
+            artifact = f"File: {tmpdir}/main.py"
+            result = _project_dir_from_artifact(artifact)
+            assert result == tmpdir

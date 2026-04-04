@@ -35,6 +35,7 @@ from ouroboros.mcp.server.adapter import _project_dir_from_artifact
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_semantic(score: float = 0.72, compliance: bool = True) -> SemanticResult:
     return SemanticResult(
         score=score,
@@ -96,6 +97,7 @@ def _context(trigger: bool = False) -> EvaluationContext:
 # ---------------------------------------------------------------------------
 # Finding 1: trigger_consensus lost when trigger_context pre-populated
 # ---------------------------------------------------------------------------
+
 
 class TestFinding1PrePopulatedTriggerContext:
     """trigger_consensus must be merged into a caller-supplied TriggerContext."""
@@ -159,6 +161,7 @@ class TestFinding1PrePopulatedTriggerContext:
 # Finding 2: trigger_consensus ignored when stage2_enabled=False
 # ---------------------------------------------------------------------------
 
+
 class TestFinding2Stage2Disabled:
     """trigger_consensus=True + stage2_enabled=False → Stage 3 must still run."""
 
@@ -198,6 +201,7 @@ class TestFinding2Stage2Disabled:
 # ---------------------------------------------------------------------------
 # Finding 3+4: failure_reason ordering — Stage 3 must take priority
 # ---------------------------------------------------------------------------
+
 
 class TestFinding3And4FailureReasonOrdering:
     """When Stage 3 rejects, failure_reason must say Stage 3, not Stage 2."""
@@ -260,6 +264,7 @@ class TestFinding3And4FailureReasonOrdering:
 # ---------------------------------------------------------------------------
 # Finding 6: Spaced paths in _project_dir_from_artifact
 # ---------------------------------------------------------------------------
+
 
 class TestFinding6SpacedPaths:
     """_project_dir_from_artifact handles paths with spaces (quoted)."""
