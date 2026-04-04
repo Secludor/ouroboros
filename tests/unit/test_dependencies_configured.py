@@ -52,7 +52,7 @@ def test_runtime_and_optional_dependencies_have_upper_bounds():
         assert "<" in dep, f"Runtime dependency missing upper bound: {dep}"
 
     optional_deps = pyproject.get("project", {}).get("optional-dependencies", {})
-    for extra_name in ("claude", "litellm", "mcp", "tui"):
+    for extra_name in ("claude", "litellm", "dashboard", "mcp", "tui"):
         for dep in optional_deps[extra_name]:
             assert "<" in dep, f"Optional dependency '{extra_name}' missing upper bound: {dep}"
 
