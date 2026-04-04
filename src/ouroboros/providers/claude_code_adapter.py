@@ -29,7 +29,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import is_dataclass, replace
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
