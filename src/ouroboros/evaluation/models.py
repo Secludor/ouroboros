@@ -314,6 +314,7 @@ class EvaluationContext:
     goal: str = ""
     constraints: tuple[str, ...] = ()
     artifact_bundle: ArtifactBundle | None = None
+    trigger_consensus: bool = False
 
 
 @dataclass(frozen=True, slots=True)

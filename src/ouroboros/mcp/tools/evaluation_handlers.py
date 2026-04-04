@@ -407,6 +407,7 @@ class EvaluateHandler:
                 artifact_type=artifact_type,
                 goal=goal,
                 constraints=constraints,
+                trigger_consensus=trigger_consensus,
             )
 
             # Use injected or create services.

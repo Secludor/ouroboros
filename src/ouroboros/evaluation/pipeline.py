@@ -147,10 +147,12 @@ class EvaluationPipeline:
                 trigger_context = TriggerContext(
                     execution_id=context.execution_id,
                     semantic_result=stage2_result,
+                    manual_consensus_request=context.trigger_consensus,
                 )
 
-            # Check if Stage 2 failed on compliance
-            if not stage2_result.ac_compliance:
+            # Check if Stage 2 failed on compliance — but allow override
+            # via trigger_consensus for a second opinion from Stage 3.
+            if not stage2_result.ac_compliance and not context.trigger_consensus:
                 return self._build_result(
                     context.execution_id,
                     events,
