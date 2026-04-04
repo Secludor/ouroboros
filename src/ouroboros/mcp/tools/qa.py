@@ -13,7 +13,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import re
-import traceback
 from typing import Any
 import uuid
 
@@ -603,9 +602,18 @@ class QAHandler:
                 )
             )
 
-        except Exception as e:
-            tb = traceback.format_exc()
-            log.error("mcp.tool.qa.error", error=str(e), traceback=tb)
+        except (ValueError, RuntimeError) as e:
+            # Configuration/bootstrap errors (unsupported backend, missing
+            # provider install) — actionable by the user, safe to surface.
+            log.warning("mcp.tool.qa.config_error", error=str(e))
+            return Result.err(
+                MCPToolError(
+                    f"QA setup failed: {e}",
+                    tool_name="ouroboros_qa",
+                )
+            )
+        except Exception:
+            log.exception("mcp.tool.qa.error")
             return Result.err(
                 MCPToolError(
                     "QA evaluation failed due to an internal error. Check server logs for details.",
