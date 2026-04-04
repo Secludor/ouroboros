@@ -133,7 +133,7 @@ class PMSeed:
             assumptions=tuple(data.get("assumptions", [])),
             interview_id=data.get("interview_id", ""),
             brownfield_repos=tuple(dict(r) for r in brownfield_raw),
-            created_at=data.get("created_at", ""),
+            created_at=data.get("created_at") or datetime.now(UTC).isoformat(),
         )
 
     def to_initial_context(self) -> str:

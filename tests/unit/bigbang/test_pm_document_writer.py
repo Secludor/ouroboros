@@ -119,8 +119,8 @@ class TestGeneratePrdMarkdown:
         md = generate_pm_markdown(seed)
         assert "*Created At: 2026-03-30T11:33:57+00:00*" in md
 
-    def test_omits_empty_sections(self):
-        """Sections with no data are omitted from the output."""
+    def test_always_includes_all_sections(self):
+        """All canonical sections are rendered even when empty."""
         seed = PMSeed(
             pm_id="pm_minimal",
             product_name="Minimal",
@@ -129,12 +129,13 @@ class TestGeneratePrdMarkdown:
         )
         md = generate_pm_markdown(seed)
         assert "## Goal" in md
-        assert "## User Stories" not in md
-        assert "## Constraints" not in md
-        assert "## Success Criteria" not in md
-        assert "## Deferred Items" not in md
-        assert "## Decide Later" not in md
-        assert "## Assumptions" not in md
+        assert "## User Stories" in md
+        assert "## Constraints" in md
+        assert "## Success Criteria" in md
+        assert "## Decide Later" in md
+        assert "## Assumptions" in md
+        assert "## Existing Codebase Context" in md
+        assert md.count("*None.*") >= 5
 
     def test_default_title_when_no_product_name(self):
         """Uses fallback title when product_name is empty."""
@@ -147,6 +148,13 @@ class TestGeneratePrdMarkdown:
         seed = PMSeed(product_name="Test")
         md = generate_pm_markdown(seed)
         assert "*No goal specified.*" in md
+
+    def test_empty_created_at_is_normalized_on_load(self):
+        """Legacy seeds without created_at are normalized before rendering."""
+        seed = PMSeed.from_dict({"product_name": "Test", "goal": "Goal", "created_at": ""})
+        md = generate_pm_markdown(seed)
+        assert "*Created At: " in md
+        assert "*Created At: *" not in md
 
     def test_brownfield_repos_section(self):
         """Includes brownfield repo context when present."""
