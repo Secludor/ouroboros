@@ -28,7 +28,7 @@ dashboard = [
 ]
 mcp = ["mcp>=1.26.0,<2.0.0"]
 tui = ["textual>=1.0.0,<9.0.0"]
-all = ["ouroboros-ai[claude,litellm,mcp,tui]"]
+all = ["ouroboros-ai[claude,litellm,mcp,tui,dashboard]"]
 
 [project.scripts]
 ouroboros = "ouroboros.cli.main:app"
