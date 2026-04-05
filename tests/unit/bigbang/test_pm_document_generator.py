@@ -309,14 +309,13 @@ class TestPMDocumentGeneratorPrompt:
         assert "Not specified" in prompt  # goal fallback
         assert "Unnamed" in prompt  # product_name fallback
 
-    def test_prompt_truncates_long_codebase_context(self):
-        """Codebase context is truncated to prevent token overflow."""
+    def test_prompt_excludes_codebase_context(self):
+        """Codebase context is excluded from the generation prompt entirely."""
         long_context = "x" * 5000
         seed = _make_seed(codebase_context=long_context)
         prompt = PMDocumentGenerator._build_generation_prompt(seed)
 
-        # Should be truncated to 3000 chars
-        assert len(prompt) < len(long_context) + 2000
+        assert long_context not in prompt
 
     def test_prompt_generation_instruction_at_end(self):
         """Prompt ends with the generation instruction."""

@@ -85,9 +85,9 @@ def generate_pm_markdown(seed: PMSeed) -> str:
     title = seed.product_name or "Product Requirements Document"
     lines.append(f"# {title}")
     lines.append("")
-    lines.append(f"*Created At: {seed.created_at}*")
-    lines.append(f"*PM ID: {seed.pm_id}*")
-    lines.append("")
+    if seed.created_at:
+        lines.append(f"*Created At: {seed.created_at}*")
+        lines.append("")
 
     # Goal
     lines.append("## Goal")
@@ -148,18 +148,28 @@ def generate_pm_markdown(seed: PMSeed) -> str:
         lines.append("## Existing Codebase Context")
         lines.append("")
         for repo in seed.brownfield_repos:
-            name = repo.get("name", repo.get("path", "Unknown"))
+            name = repo.get("name") or repo.get("path") or "Unknown"
             desc = repo.get("desc", "")
-            path = repo.get("path", "")
-            lines.append(f"- **{name}** (`{path}`)")
+            path = repo.get("path") or ""
+            if path:
+                lines.append(f"- **{name}** (`{path}`)")
+            else:
+                lines.append(f"- **{name}**")
             if desc:
                 lines.append(f"  {desc}")
         lines.append("")
 
     # Footer
-    lines.append("---")
-    lines.append(f"*Interview ID: {seed.interview_id}*")
-    lines.append("")
+    footer_items: list[str] = []
+    if seed.pm_id:
+        footer_items.append(f"*PM ID: {seed.pm_id}*")
+    if seed.interview_id:
+        footer_items.append(f"*Interview ID: {seed.interview_id}*")
+    if footer_items:
+        lines.append("---")
+        for item in footer_items:
+            lines.append(item)
+        lines.append("")
 
     return "\n".join(lines)
 
