@@ -14,6 +14,8 @@ from uuid import uuid4
 
 import structlog
 
+from ouroboros.core.file_lock import file_lock
+
 log = structlog.get_logger(__name__)
 
 
@@ -217,7 +219,8 @@ class ChannelRepoRegistry:
             self._mapping = {}
             return
         try:
-            payload = json.loads(self._path.read_text(encoding="utf-8"))
+            with file_lock(self._path, exclusive=False):
+                payload = json.loads(self._path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             log.warning("openclaw.repo_registry.load_failed", path=str(self._path))
             self._mapping = {}
@@ -230,10 +233,13 @@ class ChannelRepoRegistry:
 
     def _save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(self._mapping, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        temp_path = self._path.with_suffix(self._path.suffix + ".tmp")
+        with file_lock(self._path):
+            temp_path.write_text(
+                json.dumps(self._mapping, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            temp_path.replace(self._path)
 
     def get(self, channel: ChannelRef) -> str | None:
         return self._mapping.get(channel.key)
@@ -261,7 +267,8 @@ class ChannelWorkflowManager:
         if not self._state_path.exists():
             return
         try:
-            payload = json.loads(self._state_path.read_text(encoding="utf-8"))
+            with file_lock(self._state_path, exclusive=False):
+                payload = json.loads(self._state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             log.warning("openclaw.workflow_state.load_failed", path=str(self._state_path))
             return
@@ -293,10 +300,13 @@ class ChannelWorkflowManager:
             "active_by_channel": self._active_by_channel,
             "queues": dict(self._queues),
         }
-        self._state_path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
+        temp_path = self._state_path.with_suffix(self._state_path.suffix + ".tmp")
+        with file_lock(self._state_path):
+            temp_path.write_text(
+                json.dumps(payload, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            temp_path.replace(self._state_path)
 
     def enqueue(self, request: ChannelWorkflowRequest) -> ChannelWorkflowRecord:
         now = datetime.now(UTC)

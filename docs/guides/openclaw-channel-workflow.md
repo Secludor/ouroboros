@@ -236,6 +236,22 @@ In practice:
 This gives users an event-driven experience without forcing the transport layer
 to implement its own workflow state machine.
 
+## Recommended channel / thread policy
+
+For the best Discord UX, prefer:
+
+- parent channel: brief intake / completion notifications
+- per-request thread: interview, execution progress, and terminal output
+
+Recommended approach:
+
+1. user posts a request in the parent channel
+2. transport creates or chooses a workflow thread
+3. all `ouroboros_channel_workflow` replies for that request go into the thread
+4. parent channel only receives short lifecycle summaries when needed
+
+This keeps interview noise and execution updates from overwhelming the main channel.
+
 ## Current limitation
 
 This layer currently provides the Ouroboros-side orchestration contract and state model.
