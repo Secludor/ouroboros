@@ -13,6 +13,7 @@ from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
     CancelExecutionHandler,
     CancelJobHandler,
+    ChannelWorkflowHandler,
     EvaluateHandler,
     EvolveRewindHandler,
     EvolveStepHandler,
@@ -752,7 +753,7 @@ class TestOuroborosTools:
 
     def test_ouroboros_tools_contains_all_handlers(self) -> None:
         """OUROBOROS_TOOLS contains all standard handlers."""
-        assert len(OUROBOROS_TOOLS) == 21
+        assert len(OUROBOROS_TOOLS) == 22
 
         handler_types = {type(h) for h in OUROBOROS_TOOLS}
         assert ExecuteSeedHandler in handler_types
@@ -773,6 +774,7 @@ class TestOuroborosTools:
         assert LineageStatusHandler in handler_types
         assert EvolveRewindHandler in handler_types
         assert CancelExecutionHandler in handler_types
+        assert ChannelWorkflowHandler in handler_types
 
     def test_all_tools_have_unique_names(self) -> None:
         """All tools have unique names."""
@@ -788,7 +790,7 @@ class TestOuroborosTools:
     def test_get_ouroboros_tools_can_inject_runtime_backend(self) -> None:
         """Tool factory can build execute_seed with a specific runtime backend."""
         tools = get_ouroboros_tools(runtime_backend="codex")
-        assert len(tools) == 21
+        assert len(tools) == 22
         execute_handler = next(h for h in tools if isinstance(h, ExecuteSeedHandler))
         assert execute_handler.agent_runtime_backend == "codex"
 

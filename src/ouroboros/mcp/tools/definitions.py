@@ -22,6 +22,7 @@ from ouroboros.mcp.tools.authoring_handlers import (
     GenerateSeedHandler,
     InterviewHandler,
 )
+from ouroboros.mcp.tools.channel_workflow_handler import ChannelWorkflowHandler
 from ouroboros.mcp.tools.evaluation_handlers import (
     EvaluateHandler,
     LateralThinkHandler,
@@ -126,6 +127,16 @@ def interview_handler(*, llm_backend: str | None = None) -> InterviewHandler:
     return InterviewHandler(llm_backend=llm_backend)
 
 
+def channel_workflow_handler(*, llm_backend: str | None = None) -> ChannelWorkflowHandler:
+    """Create a ChannelWorkflowHandler instance."""
+    execute_handler = ExecuteSeedHandler(llm_backend=llm_backend)
+    return ChannelWorkflowHandler(
+        interview_handler=InterviewHandler(llm_backend=llm_backend),
+        generate_seed_handler=GenerateSeedHandler(llm_backend=llm_backend),
+        start_execute_seed_handler=StartExecuteSeedHandler(execute_handler=execute_handler),
+    )
+
+
 def lateral_think_handler() -> LateralThinkHandler:
     """Create a LateralThinkHandler instance."""
     return LateralThinkHandler()
@@ -183,6 +194,7 @@ OuroborosToolHandlers = tuple[
     | CancelExecutionHandler
     | BrownfieldHandler
     | PMInterviewHandler
+    | ChannelWorkflowHandler
     | QAHandler,
     ...,
 ]
@@ -219,6 +231,7 @@ def get_ouroboros_tools(
         CancelExecutionHandler(),
         BrownfieldHandler(),
         PMInterviewHandler(llm_backend=llm_backend),
+        channel_workflow_handler(llm_backend=llm_backend),
         QAHandler(llm_backend=llm_backend),
     )
 
