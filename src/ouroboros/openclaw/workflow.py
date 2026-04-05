@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -79,6 +80,7 @@ class ChannelWorkflowRecord:
     repo: str
     request_message: str
     entry_point: WorkflowEntryPoint
+    request_fingerprint: str
     stage: WorkflowStage
     queued_at: datetime
     started_at: datetime | None = None
@@ -132,6 +134,25 @@ _SEED_HINTS = (
     "metadata:",
     "goal:",
 )
+
+
+def request_fingerprint(
+    *,
+    user_id: str | None,
+    message: str,
+    repo: str,
+    entry_point: WorkflowEntryPoint,
+) -> str:
+    """Build a stable fingerprint for duplicate-delivery protection."""
+    payload = "|".join(
+        [
+            user_id or "",
+            repo,
+            entry_point,
+            " ".join(message.strip().lower().split()),
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def detect_entry_point(
@@ -281,6 +302,12 @@ class ChannelWorkflowManager:
         now = datetime.now(UTC)
         channel_key = request.channel.key
         is_active = channel_key in self._active_by_channel
+        fingerprint = request_fingerprint(
+            user_id=request.user_id,
+            message=request.message,
+            repo=request.repo,
+            entry_point=request.entry_point,
+        )
         record = ChannelWorkflowRecord(
             workflow_id=f"wf_{uuid4().hex[:12]}",
             channel_key=channel_key,
@@ -290,6 +317,7 @@ class ChannelWorkflowManager:
             repo=request.repo,
             request_message=request.message,
             entry_point=request.entry_point,
+            request_fingerprint=fingerprint,
             stage=(
                 WorkflowStage.QUEUED
                 if is_active
@@ -326,6 +354,34 @@ class ChannelWorkflowManager:
         if workflow_id is None:
             return None
         return self._records.get(workflow_id)
+
+    def find_inflight_duplicate(
+        self,
+        channel: ChannelRef,
+        *,
+        user_id: str | None,
+        message: str,
+        repo: str,
+        entry_point: WorkflowEntryPoint,
+    ) -> ChannelWorkflowRecord | None:
+        """Return an active/queued matching workflow if this looks like a redelivery."""
+        fingerprint = request_fingerprint(
+            user_id=user_id,
+            message=message,
+            repo=repo,
+            entry_point=entry_point,
+        )
+        candidates: list[ChannelWorkflowRecord] = []
+        active = self.active_for_channel(channel)
+        if active is not None and not active.is_terminal:
+            candidates.append(active)
+        candidates.extend(
+            record for record in self.queued_for_channel(channel) if not record.is_terminal
+        )
+        return next(
+            (record for record in candidates if record.request_fingerprint == fingerprint),
+            None,
+        )
 
     def queued_for_channel(self, channel: ChannelRef) -> list[ChannelWorkflowRecord]:
         return [

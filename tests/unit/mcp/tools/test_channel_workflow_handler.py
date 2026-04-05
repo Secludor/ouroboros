@@ -226,6 +226,7 @@ async def test_same_channel_second_request_is_queued(handler: ChannelWorkflowHan
 
     assert result.is_ok
     assert result.value.meta["stage"] == "queued"
+    assert result.value.meta["duplicate_delivery"] is False
 
 
 @pytest.mark.asyncio
@@ -259,6 +260,7 @@ async def test_interview_completion_generates_seed_and_starts_execution(
     assert result.is_ok
     assert result.value.meta["stage"] == "executing"
     assert result.value.meta["job_id"] == "job_1"
+    assert result.value.meta["seed_id"] == "seed_1"
 
 
 @pytest.mark.asyncio
@@ -278,6 +280,7 @@ async def test_seed_like_input_skips_interview(handler: ChannelWorkflowHandler) 
 
     assert result.is_ok
     assert result.value.meta["stage"] == "executing"
+    assert result.value.meta["entry_point"] == "execution"
 
 
 @pytest.mark.asyncio
@@ -300,6 +303,7 @@ async def test_poll_completes_execution_and_reports_draft_pr(
     result = await handler.handle({"action": "poll", "guild_id": "g1", "channel_id": "c2"})
 
     assert result.is_ok
+    assert result.value.meta["cursor"] == 1
     assert "https://example.com/pr/123" in result.value.content[0].text
 
 
@@ -331,6 +335,7 @@ async def test_wait_completes_execution_and_reports_draft_pr(
 
     assert result.is_ok
     assert result.value.meta["action"] == "wait"
+    assert result.value.meta["cursor"] == 1
     assert "https://example.com/pr/123" in result.value.content[0].text
 
 
@@ -380,6 +385,7 @@ async def test_status_reports_default_repo_and_queue(handler: ChannelWorkflowHan
     text = result.value.content[0].text
     assert "Default repo: /repo/demo" in text
     assert "Queued workflows: 1" in text
+    assert result.value.meta["action"] == "status"
 
 
 @pytest.mark.asyncio
@@ -419,6 +425,39 @@ async def test_poll_advances_queue_after_completion(handler: ChannelWorkflowHand
     assert "Queued workflows: 0" in text
     assert "Active workflow:" in text
     assert "interviewing" in text
+
+
+@pytest.mark.asyncio
+async def test_duplicate_delivery_reuses_existing_workflow(handler: ChannelWorkflowHandler) -> None:
+    await handler.handle(
+        {"action": "set_repo", "guild_id": "g1", "channel_id": "dup", "repo": "/repo/demo"}
+    )
+    first = await handler.handle(
+        {
+            "action": "message",
+            "guild_id": "g1",
+            "channel_id": "dup",
+            "user_id": "u1",
+            "message": "work on feature x",
+        }
+    )
+    duplicate = await handler.handle(
+        {
+            "action": "message",
+            "guild_id": "g1",
+            "channel_id": "dup",
+            "user_id": "u1",
+            "message": "work on feature x",
+        }
+    )
+
+    assert first.is_ok
+    assert duplicate.is_ok
+    assert duplicate.value.meta["duplicate_delivery"] is True
+    assert duplicate.value.meta["duplicate_of"] == first.value.meta["workflow_id"]
+    status = await handler.handle({"action": "status", "guild_id": "g1", "channel_id": "dup"})
+    assert status.is_ok
+    assert "Queued workflows: 0" in status.value.content[0].text
 
 
 @pytest.mark.asyncio

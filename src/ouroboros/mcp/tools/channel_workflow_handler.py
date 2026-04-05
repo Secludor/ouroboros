@@ -65,6 +65,35 @@ class ChannelWorkflowHandler:
         self._job_wait_handler = self.job_wait_handler or JobWaitHandler()
         self._job_result_handler = self.job_result_handler or JobResultHandler()
 
+    @staticmethod
+    def _meta(**kwargs: Any) -> dict[str, Any]:
+        """Build a stable metadata shape for channel workflow responses."""
+        meta = {
+            "action": None,
+            "channel_key": None,
+            "workflow_id": None,
+            "stage": None,
+            "entry_point": None,
+            "reason": None,
+            "repo": None,
+            "session_id": None,
+            "execution_id": None,
+            "job_id": None,
+            "seed_id": None,
+            "pr_url": None,
+            "job_status": None,
+            "cursor": None,
+            "changed": None,
+            "ambiguity_score": None,
+            "seed_ready": None,
+            "next_workflow_started": False,
+            "duplicate_delivery": False,
+            "duplicate_of": None,
+            "active": None,
+        }
+        meta.update(kwargs)
+        return meta
+
     @property
     def definition(self) -> MCPToolDefinition:
         return MCPToolDefinition(
@@ -172,17 +201,17 @@ class ChannelWorkflowHandler:
             self._repo_registry.set(channel, repo.strip())
             return self._ok(
                 f"Default repo for channel {channel.key} set to `{repo.strip()}`.",
-                {
-                    "channel_key": channel.key,
-                    "repo": repo.strip(),
-                    "action": action,
-                },
+                self._meta(
+                    action=action,
+                    channel_key=channel.key,
+                    repo=repo.strip(),
+                ),
             )
 
         if action == "status":
             return self._ok(
                 render_channel_summary(channel, self._workflow_manager, self._repo_registry),
-                {"channel_key": channel.key, "action": action},
+                self._meta(action=action, channel_key=channel.key),
             )
 
         if action == "poll":
@@ -204,18 +233,18 @@ class ChannelWorkflowHandler:
         if active is None:
             return self._ok(
                 render_channel_summary(channel, self._workflow_manager, self._repo_registry),
-                {"channel_key": channel.key, "action": "poll", "active": False},
+                self._meta(action="poll", channel_key=channel.key, active=False),
             )
 
         if active.stage != WorkflowStage.EXECUTING or not active.job_id:
             return self._ok(
                 render_stage_message(active),
-                {
-                    "channel_key": channel.key,
-                    "action": "poll",
-                    "workflow_id": active.workflow_id,
-                    "stage": active.stage,
-                },
+                self._meta(
+                    action="poll",
+                    channel_key=channel.key,
+                    workflow_id=active.workflow_id,
+                    stage=active.stage,
+                ),
             )
 
         status_result = await self._job_status_handler.handle({"job_id": active.job_id})
@@ -228,14 +257,14 @@ class ChannelWorkflowHandler:
         if status in {"running", "queued", "cancel_requested"}:
             return self._ok(
                 status_result.value.content[0].text,
-                {
-                    "channel_key": channel.key,
-                    "action": "poll",
-                    "workflow_id": active.workflow_id,
-                    "stage": active.stage,
-                    "job_status": status,
-                    "cursor": cursor,
-                },
+                self._meta(
+                    action="poll",
+                    channel_key=channel.key,
+                    workflow_id=active.workflow_id,
+                    stage=active.stage,
+                    job_status=status,
+                    cursor=cursor,
+                ),
             )
 
         return await self._finalize_terminal_status(
@@ -257,18 +286,18 @@ class ChannelWorkflowHandler:
         if active is None:
             return self._ok(
                 render_channel_summary(channel, self._workflow_manager, self._repo_registry),
-                {"channel_key": channel.key, "action": "wait", "active": False},
+                self._meta(action="wait", channel_key=channel.key, active=False),
             )
 
         if active.stage != WorkflowStage.EXECUTING or not active.job_id:
             return self._ok(
                 render_stage_message(active),
-                {
-                    "channel_key": channel.key,
-                    "action": "wait",
-                    "workflow_id": active.workflow_id,
-                    "stage": active.stage,
-                },
+                self._meta(
+                    action="wait",
+                    channel_key=channel.key,
+                    workflow_id=active.workflow_id,
+                    stage=active.stage,
+                ),
             )
 
         wait_result = await self._job_wait_handler.handle(
@@ -290,15 +319,15 @@ class ChannelWorkflowHandler:
         if status in {"running", "queued", "cancel_requested"}:
             return self._ok(
                 wait_result.value.content[0].text,
-                {
-                    "channel_key": channel.key,
-                    "action": "wait",
-                    "workflow_id": active.workflow_id,
-                    "stage": active.stage,
-                    "job_status": status,
-                    "cursor": cursor,
-                    "changed": changed,
-                },
+                self._meta(
+                    action="wait",
+                    channel_key=channel.key,
+                    workflow_id=active.workflow_id,
+                    stage=active.stage,
+                    job_status=status,
+                    cursor=cursor,
+                    changed=changed,
+                ),
             )
 
         return await self._finalize_terminal_status(
@@ -341,6 +370,27 @@ class ChannelWorkflowHandler:
                 seed_content=arguments.get("seed_content"),
                 seed_path=arguments.get("seed_path"),
             )
+            duplicate = self._workflow_manager.find_inflight_duplicate(
+                channel,
+                user_id=user_id,
+                message=message.strip(),
+                repo=str(repo),
+                entry_point=detection.entry_point,
+            )
+            if duplicate is not None:
+                return self._ok(
+                    render_stage_message(duplicate),
+                    self._meta(
+                        action="message",
+                        channel_key=channel.key,
+                        workflow_id=duplicate.workflow_id,
+                        stage=duplicate.stage,
+                        entry_point=duplicate.entry_point,
+                        repo=duplicate.repo,
+                        duplicate_delivery=True,
+                        duplicate_of=duplicate.workflow_id,
+                    ),
+                )
             queued = self._workflow_manager.enqueue(
                 ChannelWorkflowRequest(
                     channel=channel,
@@ -354,13 +404,15 @@ class ChannelWorkflowHandler:
             )
             return self._ok(
                 render_stage_message(queued),
-                {
-                    "channel_key": channel.key,
-                    "workflow_id": queued.workflow_id,
-                    "stage": queued.stage,
-                    "entry_point": queued.entry_point,
-                    "reason": detection.reason,
-                },
+                self._meta(
+                    action="message",
+                    channel_key=channel.key,
+                    workflow_id=queued.workflow_id,
+                    stage=queued.stage,
+                    entry_point=queued.entry_point,
+                    reason=detection.reason,
+                    repo=queued.repo,
+                ),
             )
 
         repo_value = arguments.get("repo") or self._repo_registry.get(channel)
@@ -377,6 +429,27 @@ class ChannelWorkflowHandler:
             seed_content=arguments.get("seed_content"),
             seed_path=arguments.get("seed_path"),
         )
+        duplicate = self._workflow_manager.find_inflight_duplicate(
+            channel,
+            user_id=user_id,
+            message=message.strip(),
+            repo=repo_value.strip(),
+            entry_point=detection.entry_point,
+        )
+        if duplicate is not None:
+            return self._ok(
+                render_stage_message(duplicate),
+                self._meta(
+                    action="message",
+                    channel_key=channel.key,
+                    workflow_id=duplicate.workflow_id,
+                    stage=duplicate.stage,
+                    entry_point=duplicate.entry_point,
+                    repo=duplicate.repo,
+                    duplicate_delivery=True,
+                    duplicate_of=duplicate.workflow_id,
+                ),
+            )
         record = self._workflow_manager.enqueue(
             ChannelWorkflowRequest(
                 channel=channel,
@@ -408,12 +481,14 @@ class ChannelWorkflowHandler:
                 )
             return self._ok(
                 result.value.content[0].text,
-                {
-                    "workflow_id": record.workflow_id,
-                    "stage": record.stage,
-                    "entry_point": record.entry_point,
-                    "session_id": session_id,
-                },
+                self._meta(
+                    action="message",
+                    workflow_id=record.workflow_id,
+                    stage=record.stage,
+                    entry_point=record.entry_point,
+                    session_id=session_id,
+                    repo=record.repo,
+                ),
             )
 
         seed_content = record.seed_content or record.request_message
@@ -436,14 +511,16 @@ class ChannelWorkflowHandler:
         )
         return self._ok(
             execute_result.value.content[0].text,
-            {
-                "workflow_id": record.workflow_id,
-                "stage": record.stage,
-                "entry_point": record.entry_point,
-                "job_id": meta.get("job_id"),
-                "session_id": meta.get("session_id"),
-                "execution_id": meta.get("execution_id"),
-            },
+            self._meta(
+                action="message",
+                workflow_id=record.workflow_id,
+                stage=record.stage,
+                entry_point=record.entry_point,
+                repo=record.repo,
+                job_id=meta.get("job_id"),
+                session_id=meta.get("session_id"),
+                execution_id=meta.get("execution_id"),
+            ),
         )
 
     async def _maybe_launch_next_workflow(
@@ -491,26 +568,26 @@ class ChannelWorkflowHandler:
                         "Started next queued workflow:\n\n"
                         f"{next_result.value.content[0].text}"
                     ),
-                    {
-                        "channel_key": channel.key,
-                        "action": action,
-                        "workflow_id": completed.workflow_id,
-                        "stage": completed.stage,
-                        "pr_url": pr_url,
-                        "next_workflow_started": True,
-                        "cursor": cursor,
-                    },
+                    self._meta(
+                        action=action,
+                        channel_key=channel.key,
+                        workflow_id=completed.workflow_id,
+                        stage=completed.stage,
+                        pr_url=pr_url,
+                        next_workflow_started=True,
+                        cursor=cursor,
+                    ),
                 )
             return self._ok(
                 render_result_message(completed),
-                {
-                    "channel_key": channel.key,
-                    "action": action,
-                    "workflow_id": completed.workflow_id,
-                    "stage": completed.stage,
-                    "pr_url": pr_url,
-                    "cursor": cursor,
-                },
+                self._meta(
+                    action=action,
+                    channel_key=channel.key,
+                    workflow_id=completed.workflow_id,
+                    stage=completed.stage,
+                    pr_url=pr_url,
+                    cursor=cursor,
+                ),
             )
 
         failed = self._workflow_manager.mark_failed(active.workflow_id, error=result_text)
@@ -522,24 +599,24 @@ class ChannelWorkflowHandler:
                     "Started next queued workflow:\n\n"
                     f"{next_result.value.content[0].text}"
                 ),
-                {
-                    "channel_key": channel.key,
-                    "action": action,
-                    "workflow_id": failed.workflow_id,
-                    "stage": failed.stage,
-                    "next_workflow_started": True,
-                    "cursor": cursor,
-                },
+                self._meta(
+                    action=action,
+                    channel_key=channel.key,
+                    workflow_id=failed.workflow_id,
+                    stage=failed.stage,
+                    next_workflow_started=True,
+                    cursor=cursor,
+                ),
             )
         return self._ok(
             render_result_message(failed),
-            {
-                "channel_key": channel.key,
-                "action": action,
-                "workflow_id": failed.workflow_id,
-                "stage": failed.stage,
-                "cursor": cursor,
-            },
+            self._meta(
+                action=action,
+                channel_key=channel.key,
+                workflow_id=failed.workflow_id,
+                stage=failed.stage,
+                cursor=cursor,
+            ),
         )
 
     async def _resume_interview(
@@ -598,25 +675,28 @@ class ChannelWorkflowHandler:
             )
             return self._ok(
                 combined_text,
-                {
-                    "workflow_id": executing.workflow_id,
-                    "stage": executing.stage,
-                    "seed_id": seed_result.value.meta.get("seed_id"),
-                    "job_id": execute_meta.get("job_id"),
-                    "session_id": execute_meta.get("session_id"),
-                    "execution_id": execute_meta.get("execution_id"),
-                },
+                self._meta(
+                    action="message",
+                    workflow_id=executing.workflow_id,
+                    stage=executing.stage,
+                    seed_id=seed_result.value.meta.get("seed_id"),
+                    job_id=execute_meta.get("job_id"),
+                    session_id=execute_meta.get("session_id"),
+                    execution_id=execute_meta.get("execution_id"),
+                    repo=record.repo,
+                ),
             )
 
         return self._ok(
             result.value.content[0].text,
-            {
-                "workflow_id": record.workflow_id,
-                "stage": record.stage,
-                "session_id": record.interview_session_id,
-                "ambiguity_score": meta.get("ambiguity_score"),
-                "seed_ready": meta.get("seed_ready"),
-            },
+            self._meta(
+                action="message",
+                workflow_id=record.workflow_id,
+                stage=record.stage,
+                session_id=record.interview_session_id,
+                ambiguity_score=meta.get("ambiguity_score"),
+                seed_ready=meta.get("seed_ready"),
+            )
         )
 
     @staticmethod
