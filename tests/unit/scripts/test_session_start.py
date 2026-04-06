@@ -49,9 +49,9 @@ class TestSessionStartMain:
 
         captured = capsys.readouterr()
         assert captured.out == ""
-        assert "Ouroboros update available" in captured.err
+        assert captured.err == "Ouroboros update available\n"
 
-    def test_update_check_failure_reports_stderr(self, monkeypatch, capsys) -> None:
+    def test_loader_failure_reports_stderr(self, monkeypatch, capsys) -> None:
         def _raise() -> None:
             raise RuntimeError("boom")
 
@@ -62,3 +62,47 @@ class TestSessionStartMain:
         captured = capsys.readouterr()
         assert captured.out == ""
         assert "ouroboros: update check failed: boom" in captured.err
+
+    def test_check_update_raises_reports_stderr(self, monkeypatch, capsys) -> None:
+        """check_update() raising after module loads is also caught."""
+        def _exploding_check():
+            raise ConnectionError("network down")
+
+        monkeypatch.setattr(
+            session_start,
+            "_load_version_checker",
+            lambda: SimpleNamespace(check_update=_exploding_check),
+        )
+
+        session_start.main()
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "ouroboros: update check failed: network down" in captured.err
+
+    def test_malformed_result_keeps_silent(self, monkeypatch, capsys) -> None:
+        """check_update() returning None or non-dict must not crash."""
+        monkeypatch.setattr(
+            session_start,
+            "_load_version_checker",
+            lambda: SimpleNamespace(check_update=lambda: None),
+        )
+
+        session_start.main()
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+
+    def test_result_missing_keys_keeps_silent(self, monkeypatch, capsys) -> None:
+        """Result dict without expected keys stays silent (no update)."""
+        monkeypatch.setattr(
+            session_start,
+            "_load_version_checker",
+            lambda: SimpleNamespace(check_update=lambda: {}),
+        )
+
+        session_start.main()
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""

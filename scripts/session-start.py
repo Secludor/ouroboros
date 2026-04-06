@@ -24,7 +24,7 @@ def _load_version_checker():
 def main() -> None:
     try:
         checker = _load_version_checker()
-        result = checker.check_update()
+        result = checker.check_update() or {}
         if result.get("update_available") and result.get("message"):
             # SessionStart stdout is consumed as Claude context, so keep the
             # success path silent and send notices to stderr instead.
