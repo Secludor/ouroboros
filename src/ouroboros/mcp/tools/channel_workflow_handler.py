@@ -362,7 +362,8 @@ class ChannelWorkflowHandler:
             str(arguments["message_id"]) if arguments.get("message_id") is not None else None
         )
         event_id = str(arguments["event_id"]) if arguments.get("event_id") is not None else None
-        event_key = message_id or event_id
+        raw_event_key = message_id or event_id
+        event_key = f"{channel.key}:{raw_event_key}" if raw_event_key else None
         if event_key and self._workflow_manager.is_event_processed(event_key):
             label = active or self._workflow_manager.latest_for_channel(channel)
             if label is not None:

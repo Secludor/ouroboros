@@ -131,17 +131,31 @@ def channel_workflow_handler(
     *,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    interview_handler: InterviewHandler | None = None,
+    generate_seed_handler: GenerateSeedHandler | None = None,
+    start_execute_seed_handler: StartExecuteSeedHandler | None = None,
+    job_wait_handler: JobWaitHandler | None = None,
+    job_status_handler: JobStatusHandler | None = None,
+    job_result_handler: JobResultHandler | None = None,
 ) -> ChannelWorkflowHandler:
-    """Create a ChannelWorkflowHandler instance."""
-    execute_handler = ExecuteSeedHandler(
-        agent_runtime_backend=runtime_backend,
-        llm_backend=llm_backend,
-    )
+    """Create a ChannelWorkflowHandler instance.
+
+    When handler instances are provided they are reused, ensuring shared
+    job state with the rest of the tool set.
+    """
+    if start_execute_seed_handler is None:
+        execute_handler = ExecuteSeedHandler(
+            agent_runtime_backend=runtime_backend,
+            llm_backend=llm_backend,
+        )
+        start_execute_seed_handler = StartExecuteSeedHandler(execute_handler=execute_handler)
     return ChannelWorkflowHandler(
-        interview_handler=InterviewHandler(llm_backend=llm_backend),
-        generate_seed_handler=GenerateSeedHandler(llm_backend=llm_backend),
-        start_execute_seed_handler=StartExecuteSeedHandler(execute_handler=execute_handler),
-        job_wait_handler=JobWaitHandler(),
+        interview_handler=interview_handler or InterviewHandler(llm_backend=llm_backend),
+        generate_seed_handler=generate_seed_handler or GenerateSeedHandler(llm_backend=llm_backend),
+        start_execute_seed_handler=start_execute_seed_handler,
+        job_wait_handler=job_wait_handler or JobWaitHandler(),
+        job_status_handler=job_status_handler or JobStatusHandler(),
+        job_result_handler=job_result_handler or JobResultHandler(),
     )
 
 
@@ -213,23 +227,34 @@ def get_ouroboros_tools(
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
 ) -> OuroborosToolHandlers:
-    """Create the default set of Ouroboros MCP tool handlers."""
+    """Create the default set of Ouroboros MCP tool handlers.
+
+    Shared handler instances are passed to ``channel_workflow_handler``
+    so the channel workflow surface uses the same job/event stores as
+    the top-level tools.
+    """
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
     )
+    start_execute = StartExecuteSeedHandler(execute_handler=execute_seed)
+    job_status = JobStatusHandler()
+    job_wait = JobWaitHandler()
+    job_result = JobResultHandler()
+    interview = InterviewHandler(llm_backend=llm_backend)
+    generate_seed = GenerateSeedHandler(llm_backend=llm_backend)
     return (
         execute_seed,
-        StartExecuteSeedHandler(execute_handler=execute_seed),
+        start_execute,
         SessionStatusHandler(),
-        JobStatusHandler(),
-        JobWaitHandler(),
-        JobResultHandler(),
+        job_status,
+        job_wait,
+        job_result,
         CancelJobHandler(),
         QueryEventsHandler(),
-        GenerateSeedHandler(llm_backend=llm_backend),
+        generate_seed,
         MeasureDriftHandler(),
-        InterviewHandler(llm_backend=llm_backend),
+        interview,
         EvaluateHandler(llm_backend=llm_backend),
         LateralThinkHandler(),
         EvolveStepHandler(),
@@ -239,7 +264,16 @@ def get_ouroboros_tools(
         CancelExecutionHandler(),
         BrownfieldHandler(),
         PMInterviewHandler(llm_backend=llm_backend),
-        channel_workflow_handler(runtime_backend=runtime_backend, llm_backend=llm_backend),
+        channel_workflow_handler(
+            runtime_backend=runtime_backend,
+            llm_backend=llm_backend,
+            interview_handler=interview,
+            generate_seed_handler=generate_seed,
+            start_execute_seed_handler=start_execute,
+            job_wait_handler=job_wait,
+            job_status_handler=job_status,
+            job_result_handler=job_result,
+        ),
         QAHandler(llm_backend=llm_backend),
     )
 
