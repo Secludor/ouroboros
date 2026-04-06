@@ -90,6 +90,12 @@ class OpenClawStateStore:
                     ON openclaw_workflows(channel_key, request_fingerprint);
                 CREATE INDEX IF NOT EXISTS ix_openclaw_workflows_job_id
                     ON openclaw_workflows(job_id);
+
+                CREATE TABLE IF NOT EXISTS openclaw_processed_events (
+                    event_key TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    processed_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
                 """
             )
 
@@ -255,3 +261,23 @@ class OpenClawStateStore:
                 (job_id,),
             ).fetchone()
             return dict(row) if row is not None else None
+
+    # ---- event dedup ----------------------------------------------------------
+
+    def is_event_processed(self, event_key: str) -> bool:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM openclaw_processed_events WHERE event_key = ?",
+                (event_key,),
+            ).fetchone()
+            return row is not None
+
+    def mark_event_processed(self, event_key: str, workflow_id: str) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO openclaw_processed_events (event_key, workflow_id)
+                VALUES (?, ?)
+                """,
+                (event_key, workflow_id),
+            )

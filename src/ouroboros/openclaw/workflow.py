@@ -412,6 +412,12 @@ class ChannelWorkflowManager:
         row = self._store.find_by_job_id(job_id)
         return ChannelWorkflowRecord.from_json(row) if row is not None else None
 
+    def is_event_processed(self, event_key: str) -> bool:
+        return self._store.is_event_processed(event_key)
+
+    def mark_event_processed(self, event_key: str, workflow_id: str) -> None:
+        self._store.mark_event_processed(event_key, workflow_id)
+
 
 def render_stage_message(record: ChannelWorkflowRecord) -> str:
     """Render a concise channel-facing update for the workflow stage."""

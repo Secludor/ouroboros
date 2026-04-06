@@ -398,7 +398,27 @@ class ChannelWorkflowHandler:
             and mode != "new"
             and (active.user_id is None or user_id == active.user_id)
         ):
-            return await self._runtime.resume_interview(active, normalized_message)
+            message_id = (
+                str(arguments["message_id"]) if arguments.get("message_id") is not None else None
+            )
+            event_id = str(arguments["event_id"]) if arguments.get("event_id") is not None else None
+            answer_event_key = message_id or event_id
+            if answer_event_key and self._workflow_manager.is_event_processed(answer_event_key):
+                return self._ok(
+                    render_stage_message(active),
+                    self._meta(
+                        action="message",
+                        channel_key=channel.key,
+                        workflow_id=active.workflow_id,
+                        stage=active.stage,
+                        duplicate_delivery=True,
+                        duplicate_of=active.workflow_id,
+                    ),
+                )
+            result = await self._runtime.resume_interview(active, normalized_message)
+            if result.is_ok and answer_event_key:
+                self._workflow_manager.mark_event_processed(answer_event_key, active.workflow_id)
+            return result
 
         if mode == "answer":
             return self._ok(

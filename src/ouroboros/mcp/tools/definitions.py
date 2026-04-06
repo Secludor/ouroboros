@@ -127,9 +127,16 @@ def interview_handler(*, llm_backend: str | None = None) -> InterviewHandler:
     return InterviewHandler(llm_backend=llm_backend)
 
 
-def channel_workflow_handler(*, llm_backend: str | None = None) -> ChannelWorkflowHandler:
+def channel_workflow_handler(
+    *,
+    runtime_backend: str | None = None,
+    llm_backend: str | None = None,
+) -> ChannelWorkflowHandler:
     """Create a ChannelWorkflowHandler instance."""
-    execute_handler = ExecuteSeedHandler(llm_backend=llm_backend)
+    execute_handler = ExecuteSeedHandler(
+        agent_runtime_backend=runtime_backend,
+        llm_backend=llm_backend,
+    )
     return ChannelWorkflowHandler(
         interview_handler=InterviewHandler(llm_backend=llm_backend),
         generate_seed_handler=GenerateSeedHandler(llm_backend=llm_backend),
@@ -232,7 +239,7 @@ def get_ouroboros_tools(
         CancelExecutionHandler(),
         BrownfieldHandler(),
         PMInterviewHandler(llm_backend=llm_backend),
-        channel_workflow_handler(llm_backend=llm_backend),
+        channel_workflow_handler(runtime_backend=runtime_backend, llm_backend=llm_backend),
         QAHandler(llm_backend=llm_backend),
     )
 
