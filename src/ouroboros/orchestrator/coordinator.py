@@ -32,9 +32,17 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
-from ouroboros.orchestrator.adapter import RuntimeHandle
+from ouroboros.orchestrator.adapter import DEFAULT_TOOLS, RuntimeHandle
+from ouroboros.orchestrator.capabilities import build_capability_graph
 from ouroboros.orchestrator.execution_runtime_scope import (
     build_level_coordinator_runtime_scope,
+)
+from ouroboros.orchestrator.mcp_tools import assemble_session_tool_catalog
+from ouroboros.orchestrator.policy import (
+    PolicyContext,
+    PolicyExecutionPhase,
+    PolicySessionRole,
+    allowed_capability_names,
 )
 
 if TYPE_CHECKING:
@@ -50,15 +58,25 @@ _COORDINATOR_SESSION_ROLE = "coordinator"
 _COORDINATOR_ARTIFACT_TYPE = "coordinator_review"
 
 
-# Tools available to the Coordinator Claude session
-COORDINATOR_TOOLS: list[str] = ["Read", "Bash", "Edit", "Grep", "Glob"]
-
 # System prompt for the Coordinator agent
 COORDINATOR_SYSTEM_PROMPT = (
     "You are a Level Coordinator reviewing parallel AC execution results. "
     "Your job is to detect and resolve file conflicts, then provide actionable "
     "guidance for the next level of execution. Be concise and precise."
 )
+
+
+def derive_coordinator_tools(runtime_backend: str | None) -> list[str]:
+    """Derive the coordinator envelope from the engine policy plane."""
+    capability_graph = build_capability_graph(assemble_session_tool_catalog(DEFAULT_TOOLS))
+    return allowed_capability_names(
+        capability_graph,
+        PolicyContext(
+            runtime_backend=runtime_backend,
+            session_role=PolicySessionRole.COORDINATOR,
+            execution_phase=PolicyExecutionPhase.COORDINATOR_REVIEW,
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -180,6 +198,7 @@ class LevelCoordinator:
         self,
         adapter: AgentRuntime,
         inherited_runtime_handle: RuntimeHandle | None = None,
+        task_cwd: str | None = None,
     ) -> None:
         """Initialize coordinator.
 
@@ -190,6 +209,7 @@ class LevelCoordinator:
         """
         self._adapter = adapter
         self._inherited_runtime_handle = inherited_runtime_handle
+        self._task_cwd = task_cwd
         self._level_runtime_handles: dict[tuple[str, int], RuntimeHandle] = {}
 
     def _build_level_runtime_handle(
@@ -208,7 +228,7 @@ class LevelCoordinator:
             # Fallback: use inherited runtime handle if available
             return self._inherited_runtime_handle
 
-        cwd = self._adapter.working_directory
+        cwd = self._task_cwd or self._adapter.working_directory
         approval_mode = self._adapter.permission_mode
         native_session_id = seeded_handle.native_session_id if seeded_handle is not None else None
         if native_session_id is None and previous_review is not None:
@@ -362,7 +382,7 @@ class LevelCoordinator:
         try:
             async for message in self._adapter.execute_task(
                 prompt=prompt,
-                tools=COORDINATOR_TOOLS,
+                tools=derive_coordinator_tools(self._adapter.runtime_backend),
                 system_prompt=COORDINATOR_SYSTEM_PROMPT,
                 resume_handle=runtime_handle,
             ):
@@ -595,5 +615,5 @@ __all__ = [
     "CoordinatorReview",
     "FileConflict",
     "LevelCoordinator",
-    "COORDINATOR_TOOLS",
+    "derive_coordinator_tools",
 ]

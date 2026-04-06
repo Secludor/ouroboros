@@ -18,6 +18,7 @@ from ouroboros.core.seed import (
     SeedMetadata,
 )
 from ouroboros.core.types import Result
+from ouroboros.core.worktree import TaskWorkspace
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.adapter import AgentMessage, RuntimeHandle
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
@@ -33,6 +34,19 @@ from ouroboros.orchestrator.runner import (
     build_task_prompt,
 )
 from ouroboros.orchestrator.session import SessionStatus, SessionTracker
+
+
+def _task_workspace() -> TaskWorkspace:
+    return TaskWorkspace(
+        durable_id="orch_test",
+        repo_root="/tmp/repo",
+        repo_name="repo",
+        original_cwd="/tmp/repo",
+        effective_cwd="/tmp/worktree/repo/orch_test",
+        worktree_path="/tmp/worktree/repo/orch_test",
+        branch="ooo/orch_test",
+        lock_path="/tmp/worktree/.locks/repo/orch_test.json",
+    )
 
 
 @pytest.fixture
@@ -352,7 +366,57 @@ class TestOrchestratorRunner:
         assert resume_handle.cwd == "/tmp/project"
         assert resume_handle.metadata["tool_catalog"][0]["name"] == "Read"
         assert resume_handle.metadata["tool_catalog"][0]["id"] == "builtin:Read"
+        assert resume_handle.metadata["capability_graph"][0]["name"] == "Read"
+        assert resume_handle.metadata["control_plane"][0]["name"] == "Read"
         assert "Edit" in {tool["name"] for tool in resume_handle.metadata["tool_catalog"]}
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_terminates_live_runtime_handle_after_completion(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Sequential runs should best-effort terminate live runtime handles on exit."""
+        from ouroboros.core.types import Result
+
+        terminate_calls = 0
+
+        async def _terminate(_handle: RuntimeHandle) -> bool:
+            nonlocal terminate_calls
+            terminate_calls += 1
+            return True
+
+        live_handle = RuntimeHandle(
+            backend="opencode",
+            native_session_id="oc-session-live",
+        ).bind_controls(terminate_callback=_terminate)
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            yield AgentMessage(
+                type="result",
+                content="[TASK_COMPLETE]",
+                data={"subtype": "success"},
+                resume_handle=live_handle,
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        async def mock_create_session(*args: Any, **kwargs: Any):
+            return Result.ok(SessionTracker.create("exec", sample_seed.metadata.seed_id))
+
+        async def mock_mark_completed(*args: Any, **kwargs: Any):
+            return Result.ok(None)
+
+        with (
+            patch.object(runner._session_repo, "create_session", mock_create_session),
+            patch.object(runner._session_repo, "mark_completed", mock_mark_completed),
+        ):
+            result = await runner.execute_seed(sample_seed, parallel=False)
+
+        assert result.is_ok
+        assert terminate_calls == 1
 
     def test_build_progress_update_serializes_opencode_tool_result_metadata(
         self,
@@ -767,6 +831,104 @@ class TestOrchestratorRunner:
         assert "session" in str(result.error).lower()
 
     @pytest.mark.asyncio
+    async def test_execute_seed_session_creation_failure_releases_workspace_lock(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Session creation errors should not leak an acquired workspace lock."""
+        from ouroboros.core.errors import PersistenceError
+        from ouroboros.core.types import Result
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=_task_workspace(),
+        )
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "create_session",
+                return_value=Result.err(PersistenceError("DB error")),
+            ),
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.execute_seed(sample_seed)
+
+        assert result.is_err
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_start_event_failure_cleans_up_workspace_lock(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Start-event failures should release the workspace lock and unregister the session."""
+        from ouroboros.core.types import Result
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=_task_workspace(),
+        )
+        tracker = SessionTracker.create("exec_setup", sample_seed.metadata.seed_id)
+
+        with (
+            patch.object(runner._session_repo, "create_session", return_value=Result.ok(tracker)),
+            patch.object(
+                runner._event_store,
+                "append",
+                AsyncMock(side_effect=RuntimeError("event append failed")),
+            ),
+            patch.object(runner, "_unregister_session") as unregister_mock,
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.execute_seed(sample_seed, execution_id="exec_setup")
+
+        assert result.is_err
+        unregister_mock.assert_called_once_with("exec_setup", tracker.session_id)
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+
+    @pytest.mark.asyncio
+    async def test_execute_seed_tool_setup_failure_cleans_up_workspace_lock(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Merged-tool setup failures should release the workspace lock and unregister."""
+        from ouroboros.core.types import Result
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=_task_workspace(),
+        )
+        tracker = SessionTracker.create("exec_tools", sample_seed.metadata.seed_id)
+
+        with (
+            patch.object(runner._session_repo, "create_session", return_value=Result.ok(tracker)),
+            patch.object(runner, "_get_merged_tools", AsyncMock(side_effect=RuntimeError("boom"))),
+            patch.object(runner, "_unregister_session") as unregister_mock,
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.execute_seed(sample_seed, execution_id="exec_tools")
+
+        assert result.is_err
+        unregister_mock.assert_called_once_with("exec_tools", tracker.session_id)
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+
+    @pytest.mark.asyncio
     async def test_resume_session_already_completed(
         self,
         runner: OrchestratorRunner,
@@ -790,6 +952,77 @@ class TestOrchestratorRunner:
         assert "terminal state" in str(result.error).lower()
 
     @pytest.mark.asyncio
+    async def test_resume_session_already_completed_releases_workspace_lock(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Terminal resume attempts should not leak the acquired workspace lock."""
+        from ouroboros.core.types import Result
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=_task_workspace(),
+        )
+        completed_tracker = SessionTracker.create("exec", "seed").with_status(
+            SessionStatus.COMPLETED
+        )
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(completed_tracker),
+            ),
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.resume_session("sess_123", sample_seed)
+
+        assert result.is_err
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+
+    @pytest.mark.asyncio
+    async def test_resume_session_tool_setup_failure_cleans_up_workspace_lock(
+        self,
+        mock_adapter: MagicMock,
+        mock_event_store: AsyncMock,
+        mock_console: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Resume setup failures should release the workspace lock and unregister."""
+        from ouroboros.core.types import Result
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            mock_event_store,
+            mock_console,
+            task_workspace=_task_workspace(),
+        )
+        running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
+            SessionStatus.RUNNING
+        )
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                return_value=Result.ok(running_tracker),
+            ),
+            patch.object(runner, "_get_merged_tools", AsyncMock(side_effect=RuntimeError("boom"))),
+            patch.object(runner, "_unregister_session") as unregister_mock,
+            patch("ouroboros.orchestrator.runner.release_lock") as release_lock_mock,
+        ):
+            result = await runner.resume_session("sess_resume", sample_seed)
+
+        assert result.is_err
+        unregister_mock.assert_called_once_with("exec_resume", "sess_resume")
+        release_lock_mock.assert_called_once_with("/tmp/worktree/.locks/repo/orch_test.json")
+
+    @pytest.mark.asyncio
     async def test_resume_session_not_found(
         self,
         runner: OrchestratorRunner,
@@ -807,6 +1040,101 @@ class TestOrchestratorRunner:
             result = await runner.resume_session("nonexistent", sample_seed)
 
         assert result.is_err
+
+    @pytest.mark.asyncio
+    async def test_resume_session_recoverable_failure_marks_session_paused(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Recoverable resume bootstrap failures should not poison the session."""
+        running_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
+            SessionStatus.RUNNING
+        )
+        runtime_handle = RuntimeHandle(backend="codex_cli", native_session_id="thread-123")
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            yield AgentMessage(
+                type="result",
+                content="Codex rejected the resume command",
+                data={
+                    "subtype": "error",
+                    "recoverable": True,
+                    "recovery": {"kind": "resume_retry"},
+                },
+                resume_handle=runtime_handle,
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(running_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_paused",
+                AsyncMock(return_value=Result.ok(None)),
+            ) as mark_paused,
+            patch.object(
+                runner._session_repo,
+                "mark_failed",
+                AsyncMock(return_value=Result.ok(None)),
+            ) as mark_failed,
+        ):
+            result = await runner.resume_session("sess_resume", sample_seed)
+
+        assert result.is_ok
+        assert result.value.success is False
+        assert result.value.final_message == "Codex rejected the resume command"
+        mark_paused.assert_awaited_once()
+        mark_failed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resume_session_allows_paused_sessions(
+        self,
+        runner: OrchestratorRunner,
+        mock_adapter: MagicMock,
+        sample_seed: Seed,
+    ) -> None:
+        """Paused sessions should remain resumable."""
+        paused_tracker = SessionTracker.create("exec_resume", "seed_resume").with_status(
+            SessionStatus.PAUSED
+        )
+        runtime_handle = RuntimeHandle(backend="codex_cli", native_session_id="thread-123")
+
+        async def mock_execute(*args: Any, **kwargs: Any) -> AsyncIterator[AgentMessage]:
+            del args, kwargs
+            yield AgentMessage(
+                type="result",
+                content="Resumed successfully",
+                data={"subtype": "success"},
+                resume_handle=runtime_handle,
+            )
+
+        mock_adapter.execute_task = mock_execute
+
+        with (
+            patch.object(
+                runner._session_repo,
+                "reconstruct_session",
+                AsyncMock(return_value=Result.ok(paused_tracker)),
+            ),
+            patch.object(
+                runner._session_repo,
+                "mark_completed",
+                AsyncMock(return_value=Result.ok(None)),
+            ) as mark_completed,
+        ):
+            result = await runner.resume_session("sess_resume", sample_seed)
+
+        assert result.is_ok
+        assert result.value.success is True
+        mark_completed.assert_awaited_once()
 
     def test_deserialize_runtime_handle_supports_legacy_progress(
         self,
@@ -973,7 +1301,7 @@ class TestOrchestratorRunner:
             async def wait(self) -> int:
                 return self._returncode
 
-        runtime = OpenCodeRuntime(  # noqa: F821
+        runtime = OpenCodeRuntime(  # type: ignore[name-defined]  # noqa: F821
             cli_path="/tmp/opencode",
             permission_mode="acceptEdits",
             cwd=tmp_path,

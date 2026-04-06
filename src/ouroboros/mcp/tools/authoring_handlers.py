@@ -5,6 +5,7 @@ Contains handlers for interview and seed generation tools:
 - InterviewHandler: Manages interactive requirement-clarification interviews.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -30,6 +31,7 @@ from ouroboros.bigbang.interview import (
 from ouroboros.bigbang.seed_generator import SeedGenerator
 from ouroboros.config import get_clarification_model
 from ouroboros.core.errors import ValidationError
+from ouroboros.core.initial_context import resolve_initial_context_input
 from ouroboros.core.types import Result
 from ouroboros.mcp.errors import MCPServerError, MCPToolError
 from ouroboros.mcp.types import (
@@ -128,6 +130,29 @@ def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None)
     if score is None:
         return question
     return f"(ambiguity: {score.overall_score:.2f}) {question}"
+
+
+def _ambiguity_warning_for_failed_question(score: AmbiguityScore | None) -> str:
+    """Build an explicit ambiguity warning for question-generation failures.
+
+    When question generation fails mid-interview, the main session must NOT
+    assume the interview is complete.
+    See: https://github.com/Q00/ouroboros/issues/210
+    """
+    if score is None:
+        return (
+            "\n\nWARNING: Ambiguity score is unknown. "
+            "The interview is NOT complete — do NOT generate a Seed. "
+            "Resume the interview to continue clarifying requirements."
+        )
+    if not score.is_ready_for_seed:
+        return (
+            f"\n\nWARNING: Current ambiguity is {score.overall_score:.2f} "
+            f"(threshold: {AMBIGUITY_THRESHOLD}). "
+            f"The interview is NOT complete — do NOT generate a Seed. "
+            f"Resume the interview to continue clarifying requirements."
+        )
+    return ""
 
 
 def _load_state_ambiguity_score(state: InterviewState) -> AmbiguityScore | None:
@@ -318,36 +343,44 @@ class GenerateSeedHandler:
 
             state: InterviewState = state_result.value
 
-            # Use provided ambiguity score, a persisted snapshot, or compute on demand.
+            # Always use a trusted ambiguity score: persisted snapshot or
+            # freshly computed.  The caller-supplied ``ambiguity_score``
+            # parameter is intentionally ignored to prevent LLM callers
+            # from overriding the gate with an arbitrary low value.
+            # See: https://github.com/Q00/ouroboros/issues/210
             if ambiguity_score_value is not None:
-                ambiguity_score = self._build_ambiguity_score_from_value(ambiguity_score_value)
-            else:
-                ambiguity_score = self._load_stored_ambiguity_score(state)
-                if ambiguity_score is None:
-                    scorer = AmbiguityScorer(
-                        llm_adapter=llm_adapter,
-                    )
-                    score_result = await scorer.score(state)
-                    if score_result.is_err:
-                        return Result.err(
-                            MCPToolError(
-                                f"Failed to calculate ambiguity: {score_result.error}",
-                                tool_name="ouroboros_generate_seed",
-                            )
-                        )
+                log.warning(
+                    "mcp.tool.generate_seed.ignoring_caller_ambiguity_score",
+                    session_id=session_id,
+                    caller_value=ambiguity_score_value,
+                )
 
-                    ambiguity_score = score_result.value
-                    state.store_ambiguity(
-                        score=ambiguity_score.overall_score,
-                        breakdown=ambiguity_score.breakdown.model_dump(mode="json"),
-                    )
-                    save_result = await interview_engine.save_state(state)
-                    if save_result.is_err:
-                        log.warning(
-                            "mcp.tool.generate_seed.persist_ambiguity_failed",
-                            session_id=session_id,
-                            error=str(save_result.error),
+            ambiguity_score = self._load_stored_ambiguity_score(state)
+            if ambiguity_score is None:
+                scorer = AmbiguityScorer(
+                    llm_adapter=llm_adapter,
+                )
+                score_result = await scorer.score(state)
+                if score_result.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            f"Failed to calculate ambiguity: {score_result.error}",
+                            tool_name="ouroboros_generate_seed",
                         )
+                    )
+
+                ambiguity_score = score_result.value
+                state.store_ambiguity(
+                    score=ambiguity_score.overall_score,
+                    breakdown=ambiguity_score.breakdown.model_dump(mode="json"),
+                )
+                save_result = await interview_engine.save_state(state)
+                if save_result.is_err:
+                    log.warning(
+                        "mcp.tool.generate_seed.persist_ambiguity_failed",
+                        session_id=session_id,
+                        error=str(save_result.error),
+                    )
 
             # Use injected or create seed generator
             generator = self.seed_generator or SeedGenerator(
@@ -434,6 +467,7 @@ class InterviewHandler:
 
     def __post_init__(self) -> None:
         """Initialize event store."""
+        self._owns_event_store = self.event_store is None
         self._event_store = self.event_store or EventStore()
         self._initialized = False
 
@@ -442,6 +476,12 @@ class InterviewHandler:
         if not self._initialized:
             await self._event_store.initialize()
             self._initialized = True
+
+    async def close(self) -> None:
+        """Close the event store if this handler owns it."""
+        if self._owns_event_store:
+            await self._event_store.close()
+            self._initialized = False
 
     async def _emit_event(self, event: Any) -> None:
         """Emit event to store. Swallows errors to not break interview flow."""
@@ -647,7 +687,16 @@ class InterviewHandler:
             # Start new interview
             if initial_context:
                 cwd = arguments.get("cwd") or os.getcwd()
-                result = await engine.start_interview(initial_context, cwd=cwd)
+                resolved_context = resolve_initial_context_input(initial_context, cwd=cwd)
+                if resolved_context.is_err:
+                    return Result.err(
+                        MCPToolError(
+                            str(resolved_context.error),
+                            tool_name="ouroboros_interview",
+                        )
+                    )
+
+                result = await engine.start_interview(resolved_context.value, cwd=cwd)
                 if result.is_err:
                     return Result.err(
                         MCPToolError(
@@ -658,7 +707,11 @@ class InterviewHandler:
 
                 state = result.value
                 _interview_id = state.interview_id
-                live_score = await self._score_interview_state(llm_adapter, state)
+                # No answers exist yet — scoring cannot trigger completion
+                # and would waste an LLM call (~3-8s). The PM handler
+                # already skips scoring before MIN_ROUNDS_BEFORE_EARLY_EXIT
+                # (pm_interview.py:889); apply the same optimisation here.
+                live_score = None
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
@@ -675,15 +728,24 @@ class InterviewHandler:
                     if "empty response" in error_msg.lower():
                         # Persist state so the session can actually be resumed
                         await engine.save_state(state)
+                        amb_warning = _ambiguity_warning_for_failed_question(live_score)
+                        stderr_info = ""
+                        err = question_result.error
+                        if hasattr(err, "details") and isinstance(err.details, dict):
+                            stderr = err.details.get("stderr", "")
+                            if stderr:
+                                stderr_info = f"\n\nDiagnostics (stderr):\n{stderr}"
                         return Result.ok(
                             MCPToolResult(
                                 content=(
                                     MCPContentItem(
                                         type=ContentType.TEXT,
                                         text=(
-                                            f"Interview started but question generation failed after retries. "
+                                            f"Question generation failed (empty response from Agent SDK). "
                                             f"Session ID: {state.interview_id}\n\n"
                                             f'Resume with: session_id="{state.interview_id}"'
+                                            f"{amb_warning}"
+                                            f"{stderr_info}"
                                         ),
                                     ),
                                 ),
@@ -722,7 +784,7 @@ class InterviewHandler:
                 await self._emit_event(
                     interview_started(
                         state.interview_id,
-                        initial_context,
+                        resolved_context.value,
                     )
                 )
 
@@ -862,23 +924,33 @@ class InterviewHandler:
                     # question generation failures downstream
                     await engine.save_state(state)
 
-                    live_score = await self._score_interview_state(llm_adapter, state)
-                    if (
-                        live_score is not None
-                        and live_score.is_ready_for_seed
-                        and _count_answered_rounds(state) >= MIN_ROUNDS_BEFORE_EARLY_EXIT
-                    ):
-                        return await self._complete_interview_response(
-                            engine,
-                            state,
-                            session_id,
-                            live_score,
+                    # Only score ambiguity when completion is actually
+                    # possible.  Before MIN_ROUNDS_BEFORE_EARLY_EXIT the
+                    # result cannot trigger early exit, so the LLM call
+                    # (~3-8 s) is pure waste.  When scoring *is* needed,
+                    # run it in parallel with question generation to halve
+                    # per-step latency.  If scoring triggers early
+                    # completion the generated question is discarded (at
+                    # most once per interview).
+                    answered = _count_answered_rounds(state)
+                    if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
+                        live_score, question_result = await asyncio.gather(
+                            self._score_interview_state(llm_adapter, state),
+                            engine.ask_next_question(state),
                         )
+                        if live_score is not None and live_score.is_ready_for_seed:
+                            return await self._complete_interview_response(
+                                engine,
+                                state,
+                                session_id,
+                                live_score,
+                            )
+                    else:
+                        live_score = None
+                        question_result = await engine.ask_next_question(state)
                 else:
                     live_score = _load_state_ambiguity_score(state)
-
-                # Generate next question (whether resuming or after recording answer)
-                question_result = await engine.ask_next_question(state)
+                    question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
                     from ouroboros.events.interview import interview_failed
@@ -891,15 +963,25 @@ class InterviewHandler:
                         )
                     )
                     if "empty response" in error_msg.lower():
+                        amb_warning = _ambiguity_warning_for_failed_question(live_score)
+                        # Extract stderr from ProviderError details for diagnostics
+                        stderr_info = ""
+                        err = question_result.error
+                        if hasattr(err, "details") and isinstance(err.details, dict):
+                            stderr = err.details.get("stderr", "")
+                            if stderr:
+                                stderr_info = f"\n\nDiagnostics (stderr):\n{stderr}"
                         return Result.ok(
                             MCPToolResult(
                                 content=(
                                     MCPContentItem(
                                         type=ContentType.TEXT,
                                         text=(
-                                            f"Question generation failed after retries. "
+                                            f"Question generation failed (empty response from Agent SDK). "
                                             f"Session ID: {session_id}\n\n"
                                             f'Resume with: session_id="{session_id}"'
+                                            f"{amb_warning}"
+                                            f"{stderr_info}"
                                         ),
                                     ),
                                 ),
@@ -983,3 +1065,6 @@ class InterviewHandler:
                     tool_name="ouroboros_interview",
                 )
             )
+        finally:
+            if self._owns_event_store:
+                await self.close()

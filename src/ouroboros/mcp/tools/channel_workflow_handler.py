@@ -473,11 +473,13 @@ class ChannelWorkflowHandler:
         return await self._runtime.launch_workflow(record)
 
     @staticmethod
-    def _ok(text: str, meta: dict[str, Any]) -> Result[MCPToolResult, MCPServerError]:
+    def _ok(
+        text: str, meta: dict[str, Any], *, is_error: bool = False
+    ) -> Result[MCPToolResult, MCPServerError]:
         return Result.ok(
             MCPToolResult(
                 content=(MCPContentItem(type=ContentType.TEXT, text=text),),
-                is_error=False,
+                is_error=is_error,
                 meta=meta,
             )
         )

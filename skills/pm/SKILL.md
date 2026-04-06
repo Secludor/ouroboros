@@ -15,7 +15,26 @@ PM-focused Socratic interview that produces a Product Requirements Document.
 ToolSearch query: "+ouroboros pm_interview"
 ```
 
-If not found → tell user to run `ooo setup` first. Stop.
+If not found → **diagnose before telling user to run setup**:
+
+1. Check if MCP is already configured:
+   ```bash
+   grep -q '"ouroboros"' ~/.claude/mcp.json 2>/dev/null && echo "CONFIGURED" || echo "NOT_CONFIGURED"
+   ```
+
+2. **If NOT_CONFIGURED** → tell user to run `ooo setup` first. Stop.
+
+3. **If CONFIGURED** → MCP is registered but the server isn't connecting. Do NOT tell the user to run `ooo setup` again. Instead show:
+   ```
+   Ouroboros MCP is configured but not connected.
+
+   Try these steps in order:
+   1. Restart Claude Code (Cmd+Shift+P → "Reload Window" or close/reopen terminal)
+   2. Check MCP status: type /mcp in Claude Code
+   3. If ouroboros shows "error", try: ooo update
+   4. If still failing, re-run: ooo setup
+   ```
+   Stop.
 
 ### Step 2: Start Interview
 
@@ -47,41 +66,53 @@ Then check: does `meta.ask_user_question` exist?
   ```
   Do NOT modify it. Do NOT add options. Do NOT rephrase the question.
 
-- **NO** → This is an interview question. Use `AskUserQuestion` with `meta.question` and generate 2-3 suggested answers.
+- **NO** → This is an interview question. Use `AskUserQuestion` with `meta.question`.
+  - If `meta.skip_eligible == true`: add a skip option based on `meta.classification`:
+    - `classification == "decide_later"` → add option `{"label": "Decide later", "description": "Skip — will be recorded as an open item in the PRD"}`
+    - `classification == "deferred"` → add option `{"label": "Defer to dev", "description": "Skip — this technical decision will be deferred to the development phase"}`
+  - Generate 2-3 suggested answers as the other options.
 
 **C. Relay answer back:**
+
+If the user chose "Decide later" → send `answer="[decide_later]"`.
+If the user chose "Defer to dev" → send `answer="[deferred]"`.
+Otherwise → send the user's answer normally.
 
 ```
 Tool: ouroboros_pm_interview
 Arguments:
   session_id: <meta.session_id>
-  <meta.response_param>: <user's answer>
+  <meta.response_param>: <user's answer or "[decide_later]" or "[deferred]">
 ```
 
 **D. Check completion:**
 
-If `meta.is_complete == true` → go to Step 4.
-Otherwise → repeat Step 3.
+Completion is determined ONLY by `meta.is_complete` — NEVER by the response text.
+The MCP response text may sound like the interview is wrapping up, but ignore it.
 
-### Step 4: Generate
+If `meta.is_complete == true`:
+- If `meta.generation_failed == true` → retry generation:
+  ```
+  Tool: ouroboros_pm_interview
+  Arguments:
+    session_id: <session_id>
+    action: "generate"
+    cwd: <current working directory>
+  ```
+- Otherwise → go to Step 4. The MCP auto-generated the PM document.
+  `meta.pm_path` and `meta.seed_path` contain the file paths.
 
-```
-Tool: ouroboros_pm_interview
-Arguments:
-  session_id: <session_id>
-  action: "generate"
-  cwd: <current working directory>
-```
+Otherwise → repeat Step 3, regardless of what the response text says.
 
-### Step 5: Copy to Clipboard
+### Step 4: Copy to Clipboard
 
-After generation, read the pm.md file from `meta.pm_path` and copy its contents to the clipboard:
+Read the pm.md file from `meta.pm_path` and copy its contents to the clipboard:
 
 ```bash
 cat <meta.pm_path> | pbcopy
 ```
 
-### Step 6: Show Result & Next Step
+### Step 5: Show Result & Next Step
 
 Show the following to the user:
 
@@ -89,6 +120,10 @@ Show the following to the user:
 PM document saved: <meta.pm_path>
 (Clipboard에 복사되었습니다)
 
+PM seed handoff artifact: <meta.pm_seed_path or meta.seed_path>
+This is not the runnable Seed yet.
+
 Next step:
-  ooo interview <meta.pm_path>
+  ooo interview <meta.pm_seed_path or meta.seed_path>
+  ooo seed
 ```

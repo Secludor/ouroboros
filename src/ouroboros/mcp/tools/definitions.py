@@ -4,6 +4,7 @@ This module re-exports all handler classes from their dedicated modules
 and provides the :func:`get_ouroboros_tools` factory that assembles
 the default handler tuple for MCP registration.
 
+
 Handler modules:
 - execution_handlers: ExecuteSeedHandler, StartExecuteSeedHandler
 - query_handlers: SessionStatusHandler, QueryEventsHandler, ACDashboardHandler
@@ -18,6 +19,7 @@ Handler modules:
 
 from __future__ import annotations
 
+from ouroboros.mcp.tools.ac_tree_hud_handler import ACTreeHUDHandler
 from ouroboros.mcp.tools.authoring_handlers import (
     GenerateSeedHandler,
     InterviewHandler,
@@ -61,11 +63,15 @@ def execute_seed_handler(
     *,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    mcp_manager: object | None = None,
+    mcp_tool_prefix: str = "",
 ) -> ExecuteSeedHandler:
     """Create an ExecuteSeedHandler instance."""
     return ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
+        mcp_manager=mcp_manager,
+        mcp_tool_prefix=mcp_tool_prefix,
     )
 
 
@@ -73,11 +79,15 @@ def start_execute_seed_handler(
     *,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    mcp_manager: object | None = None,
+    mcp_tool_prefix: str = "",
 ) -> StartExecuteSeedHandler:
     """Create a StartExecuteSeedHandler instance."""
     execute_handler = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
+        mcp_manager=mcp_manager,
+        mcp_tool_prefix=mcp_tool_prefix,
     )
     return StartExecuteSeedHandler(execute_handler=execute_handler)
 
@@ -100,6 +110,11 @@ def job_wait_handler() -> JobWaitHandler:
 def job_result_handler() -> JobResultHandler:
     """Create a JobResultHandler instance."""
     return JobResultHandler()
+
+
+def ac_tree_hud_handler() -> ACTreeHUDHandler:
+    """Create an ACTreeHUDHandler instance."""
+    return ACTreeHUDHandler()
 
 
 def cancel_job_handler() -> CancelJobHandler:
@@ -202,6 +217,7 @@ OuroborosToolHandlers = tuple[
     | JobStatusHandler
     | JobWaitHandler
     | JobResultHandler
+    | ACTreeHUDHandler
     | CancelJobHandler
     | QueryEventsHandler
     | GenerateSeedHandler
@@ -226,6 +242,8 @@ def get_ouroboros_tools(
     *,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    mcp_manager: object | None = None,
+    mcp_tool_prefix: str = "",
 ) -> OuroborosToolHandlers:
     """Create the default set of Ouroboros MCP tool handlers.
 
@@ -236,6 +254,8 @@ def get_ouroboros_tools(
     execute_seed = ExecuteSeedHandler(
         agent_runtime_backend=runtime_backend,
         llm_backend=llm_backend,
+        mcp_manager=mcp_manager,
+        mcp_tool_prefix=mcp_tool_prefix,
     )
     start_execute = StartExecuteSeedHandler(execute_handler=execute_seed)
     job_status = JobStatusHandler()
@@ -250,6 +270,7 @@ def get_ouroboros_tools(
         job_status,
         job_wait,
         job_result,
+        ACTreeHUDHandler(),
         CancelJobHandler(),
         QueryEventsHandler(),
         generate_seed,

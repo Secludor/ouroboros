@@ -11,6 +11,7 @@ from ouroboros.mcp.tools.brownfield_handler import BrownfieldHandler
 from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
     ACDashboardHandler,
+    ACTreeHUDHandler,
     CancelExecutionHandler,
     CancelJobHandler,
     ChannelWorkflowHandler,
@@ -30,6 +31,7 @@ from ouroboros.mcp.tools.definitions import (
     SessionStatusHandler,
     StartEvolveStepHandler,
     StartExecuteSeedHandler,
+    ac_tree_hud_handler,
     cancel_job_handler,
     channel_workflow_handler,
     evaluate_handler,
@@ -53,6 +55,7 @@ from ouroboros.mcp.tools.definitions import (
 from ouroboros.mcp.tools.registry import ToolRegistry
 
 __all__ = [
+    "ACTreeHUDHandler",
     "ACDashboardHandler",
     "BrownfieldHandler",
     "CancelExecutionHandler",
@@ -76,6 +79,7 @@ __all__ = [
     "StartEvolveStepHandler",
     "StartExecuteSeedHandler",
     "ToolRegistry",
+    "ac_tree_hud_handler",
     "cancel_job_handler",
     "channel_workflow_handler",
     "evaluate_handler",

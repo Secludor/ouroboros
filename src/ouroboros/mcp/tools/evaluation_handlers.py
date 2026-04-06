@@ -361,6 +361,9 @@ class EvaluateHandler:
             trigger_consensus=trigger_consensus,
         )
 
+        store = self.event_store
+        owns_event_store = False
+
         try:
             # Extract goal/constraints from seed if provided
             goal = ""
@@ -380,7 +383,9 @@ class EvaluateHandler:
 
             # Try to enrich from session repository if event_store available
             if not goal:
-                store = self.event_store or EventStore()
+                if store is None:
+                    store = EventStore()
+                    owns_event_store = True
                 try:
                     await store.initialize()
                     repo = SessionRepository(store)
@@ -394,6 +399,38 @@ class EvaluateHandler:
             # Use acceptance_criterion or derive from seed
             current_ac = acceptance_criterion or "Verify execution output meets requirements"
 
+            # Use injected or create services.
+            # Evaluation reads multiple spec files (one Read call per AC), so
+            # max_turns must be well above 1.
+            llm_adapter = self.llm_adapter or create_llm_adapter(
+                backend=self.llm_backend,
+                max_turns=20,
+            )
+            working_dir_str = arguments.get("working_dir")
+            working_dir = Path(working_dir_str).resolve() if working_dir_str else Path.cwd()
+            log.info(
+                "mcp.tool.evaluate.started",
+                session_id=session_id,
+                artifact_type=artifact_type,
+                working_dir=str(working_dir),
+                llm_backend=self.llm_backend,
+                adapter_type=type(llm_adapter).__name__,
+            )
+
+            # Collect file-based artifacts for richer semantic evaluation.
+            # working_dir is used as the project root for artifact resolution.
+            from ouroboros.evaluation.artifact_collector import ArtifactCollector
+
+            try:
+                artifact_bundle = ArtifactCollector().collect(artifact, str(working_dir))
+            except Exception as exc:
+                log.warning(
+                    "mcp.tool.evaluate.artifact_collection_failed",
+                    error=str(exc),
+                    working_dir=str(working_dir),
+                )
+                artifact_bundle = None
+
             context = EvaluationContext(
                 execution_id=session_id,
                 seed_id=seed_id,
@@ -402,15 +439,9 @@ class EvaluateHandler:
                 artifact_type=artifact_type,
                 goal=goal,
                 constraints=constraints,
+                trigger_consensus=trigger_consensus,
+                artifact_bundle=artifact_bundle,
             )
-
-            # Use injected or create services
-            llm_adapter = self.llm_adapter or create_llm_adapter(
-                backend=self.llm_backend,
-                max_turns=1,
-            )
-            working_dir_str = arguments.get("working_dir")
-            working_dir = Path(working_dir_str).resolve() if working_dir_str else Path.cwd()
             mechanical_config = build_mechanical_config(working_dir)
             config = PipelineConfig(
                 mechanical=mechanical_config,
@@ -420,9 +451,21 @@ class EvaluateHandler:
             result = await pipeline.evaluate(context)
 
             if result.is_err:
+                rendered_error = (
+                    result.error.format_details()
+                    if hasattr(result.error, "format_details")
+                    else str(result.error)
+                )
+                log.warning(
+                    "mcp.tool.evaluate.pipeline_failed",
+                    session_id=session_id,
+                    working_dir=str(working_dir),
+                    llm_backend=self.llm_backend,
+                    error=rendered_error,
+                )
                 return Result.err(
                     MCPToolError(
-                        f"Evaluation failed: {result.error}",
+                        f"Evaluation failed: {rendered_error}",
                         tool_name="ouroboros_evaluate",
                     )
                 )
@@ -464,14 +507,27 @@ class EvaluateHandler:
                     meta=meta,
                 )
             )
-        except Exception as e:
-            log.error("mcp.tool.evaluate.error", error=str(e))
+        except (ValueError, RuntimeError) as e:
+            # Configuration/bootstrap errors (unsupported backend, missing
+            # provider install) — actionable by the user, safe to surface.
+            log.warning("mcp.tool.evaluate.config_error", error=str(e))
             return Result.err(
                 MCPToolError(
-                    f"Evaluation failed: {e}",
+                    f"Evaluation setup failed: {e}",
                     tool_name="ouroboros_evaluate",
                 )
             )
+        except Exception:
+            log.exception("mcp.tool.evaluate.error")
+            return Result.err(
+                MCPToolError(
+                    "Evaluation failed due to an internal error. Check server logs for details.",
+                    tool_name="ouroboros_evaluate",
+                )
+            )
+        finally:
+            if owns_event_store and store is not None:
+                await store.close()
 
     async def _has_code_changes(self, working_dir: Path) -> bool | None:
         """Detect whether the working tree has code changes.
@@ -685,7 +741,7 @@ class LateralThinkHandler:
             )
 
         persona_str = arguments.get("persona", "contrarian")
-        failed_attempts_raw = arguments.get("failed_attempts", [])
+        failed_attempts_raw = arguments.get("failed_attempts") or []
 
         # Convert string to ThinkingPersona enum
         try:

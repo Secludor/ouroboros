@@ -44,6 +44,7 @@ from ouroboros.providers.codex_cli_stream import (
 log = structlog.get_logger()
 
 _SAFE_MODEL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_./:@-]+$")
+_MAX_OUROBOROS_DEPTH = 5
 
 _RETRYABLE_ERROR_PATTERNS = (
     "rate limit",
@@ -81,7 +82,7 @@ class CodexCliLLMAdapter:
         self._cli_path = self._resolve_cli_path(cli_path)
         self._cwd = str(Path(cwd).expanduser()) if cwd is not None else os.getcwd()
         self._permission_mode = self._resolve_permission_mode(permission_mode)
-        self._allowed_tools = allowed_tools or []
+        self._allowed_tools = list(allowed_tools) if allowed_tools is not None else None
         self._max_turns = max_turns
         self._on_message = on_message
         self._max_retries = max_retries
@@ -150,12 +151,22 @@ class CodexCliLLMAdapter:
                 "If you need tools, prefer using only the following tools:\n"
                 + "\n".join(f"- {tool}" for tool in self._allowed_tools)
             )
+        elif self._allowed_tools is not None:
+            # Explicit empty list means no tools allowed — text-only response
+            parts.append("## Tool Constraints")
+            parts.append("Do NOT use any tools or MCP calls. Respond with plain text only.")
 
         if self._max_turns > 0:
             parts.append("## Execution Budget")
-            parts.append(
-                f"Keep the work within at most {self._max_turns} tool-assisted turns if possible."
-            )
+            if self._allowed_tools == []:
+                parts.append(
+                    "Answer directly in plain text and avoid turning this into a "
+                    "multi-step tool workflow."
+                )
+            else:
+                parts.append(
+                    f"Keep the work within at most {self._max_turns} tool-assisted turns if possible."
+                )
 
         for message in messages:
             if message.role == MessageRole.SYSTEM:
@@ -621,10 +632,20 @@ class CodexCliLLMAdapter:
         env = os.environ.copy()
         for key in ("OUROBOROS_AGENT_RUNTIME", "OUROBOROS_LLM_BACKEND"):
             env.pop(key, None)
+        env.pop("CODEX_THREAD_ID", None)
+        # Strip CLAUDECODE so child codex doesn't hang in nested session
+        # detection when invoked from within Claude Code (#269).
+        env.pop("CLAUDECODE", None)
         try:
             depth = int(env.get("_OUROBOROS_DEPTH", "0")) + 1
         except (ValueError, TypeError):
             depth = 1
+        if depth > _MAX_OUROBOROS_DEPTH:
+            raise ProviderError(
+                message=f"Maximum Ouroboros nesting depth ({_MAX_OUROBOROS_DEPTH}) exceeded",
+                provider="codex_cli",
+                details={"depth": depth},
+            )
         env["_OUROBOROS_DEPTH"] = str(depth)
         return env
 

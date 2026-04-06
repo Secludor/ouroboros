@@ -1,6 +1,8 @@
 """Tests for Ouroboros tool definitions."""
 
 import asyncio
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -8,9 +10,11 @@ import pytest
 
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
+from ouroboros.mcp.job_manager import JobLinks, JobSnapshot, JobStatus
 from ouroboros.mcp.tools.authoring_handlers import _is_interview_completion_signal
 from ouroboros.mcp.tools.definitions import (
     OUROBOROS_TOOLS,
+    ACTreeHUDHandler,
     CancelExecutionHandler,
     CancelJobHandler,
     ChannelWorkflowHandler,
@@ -45,6 +49,19 @@ from ouroboros.orchestrator.adapter import (
     DELEGATED_PARENT_SESSION_ID_ARG,
 )
 from ouroboros.orchestrator.session import SessionTracker
+from ouroboros.persistence.event_store import EventStore
+from ouroboros.resilience.lateral import ThinkingPersona
+
+
+@pytest.fixture
+async def memory_event_store() -> AsyncIterator[EventStore]:
+    """Provide an initialized in-memory event store and dispose it after each test."""
+    store = EventStore("sqlite+aiosqlite:///:memory:")
+    await store.initialize()
+    try:
+        yield store
+    finally:
+        await store.close()
 
 
 def create_mock_live_ambiguity_score(
@@ -691,15 +708,14 @@ class TestQueryEventsHandler:
         assert result.is_ok
         assert "test-session" in result.value.text_content
 
-    async def test_handle_with_session_id_includes_related_parallel_execution_events(self) -> None:
+    async def test_handle_with_session_id_includes_related_parallel_execution_events(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """session_id queries should include execution and child AC aggregates."""
         from ouroboros.events.base import BaseEvent
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        await event_store.append(
+        await memory_event_store.append(
             BaseEvent(
                 type="orchestrator.session.started",
                 aggregate_type="session",
@@ -711,7 +727,7 @@ class TestQueryEventsHandler:
                 },
             )
         )
-        await event_store.append(
+        await memory_event_store.append(
             BaseEvent(
                 type="workflow.progress.updated",
                 aggregate_type="execution",
@@ -726,7 +742,7 @@ class TestQueryEventsHandler:
                 },
             )
         )
-        await event_store.append(
+        await memory_event_store.append(
             BaseEvent(
                 type="execution.session.started",
                 aggregate_type="execution",
@@ -738,7 +754,7 @@ class TestQueryEventsHandler:
             )
         )
 
-        handler = QueryEventsHandler(event_store=event_store)
+        handler = QueryEventsHandler(event_store=memory_event_store)
         result = await handler.handle({"session_id": "orch_parallel_123", "limit": 20})
 
         assert result.is_ok
@@ -753,9 +769,10 @@ class TestOuroborosTools:
 
     def test_ouroboros_tools_contains_all_handlers(self) -> None:
         """OUROBOROS_TOOLS contains all standard handlers."""
-        assert len(OUROBOROS_TOOLS) >= 22
+        assert len(OUROBOROS_TOOLS) == 23
 
         handler_types = {type(h) for h in OUROBOROS_TOOLS}
+        assert ACTreeHUDHandler in handler_types
         assert ExecuteSeedHandler in handler_types
         assert StartExecuteSeedHandler in handler_types
         assert SessionStatusHandler in handler_types
@@ -790,7 +807,7 @@ class TestOuroborosTools:
     def test_get_ouroboros_tools_can_inject_runtime_backend(self) -> None:
         """Tool factory can build execute_seed with a specific runtime backend."""
         tools = get_ouroboros_tools(runtime_backend="codex")
-        assert len(tools) >= 22
+        assert len(tools) == 23
         execute_handler = next(h for h in tools if isinstance(h, ExecuteSeedHandler))
         assert execute_handler.agent_runtime_backend == "codex"
 
@@ -971,6 +988,11 @@ class TestAsyncJobHandlers:
         handler = StartExecuteSeedHandler()
         assert handler.definition.name == "ouroboros_start_execute_seed"
 
+    def test_start_execute_seed_definition_mentions_ac_tree_hud(self) -> None:
+        handler = StartExecuteSeedHandler()
+        assert "ouroboros_ac_tree_hud" in handler.definition.description
+        assert "ouroboros_job_wait" not in handler.definition.description
+
     def test_job_status_definition_name(self) -> None:
         handler = JobStatusHandler()
         assert handler.definition.name == "ouroboros_job_status"
@@ -983,6 +1005,11 @@ class TestAsyncJobHandlers:
     def test_job_result_definition_name(self) -> None:
         handler = JobResultHandler()
         assert handler.definition.name == "ouroboros_job_result"
+
+    def test_ac_tree_hud_definition_has_expected_params(self) -> None:
+        handler = ACTreeHUDHandler()
+        param_names = {p.name for p in handler.definition.parameters}
+        assert param_names == {"session_id", "cursor", "max_nodes"}
 
     def test_cancel_job_definition_name(self) -> None:
         handler = CancelJobHandler()
@@ -1015,6 +1042,77 @@ metadata:
   ambiguity_score: 0.1
   interview_id: null
 """
+
+
+class TestLateralThinkHandler:
+    """Test LateralThinkHandler argument normalization."""
+
+    async def test_handle_treats_null_failed_attempts_as_empty(self) -> None:
+        """Explicit null from MCP clients should behave like an omitted optional array."""
+        handler = LateralThinkHandler()
+
+        mock_lateral_result = MagicMock(
+            approach_summary="Try a different angle",
+            prompt="Consider an alternative path",
+            questions=("What assumption can you invert?",),
+            persona=MagicMock(value="contrarian"),
+        )
+        mock_thinker = MagicMock()
+        mock_thinker.generate_alternative.return_value = Result.ok(mock_lateral_result)
+
+        with patch(
+            "ouroboros.resilience.lateral.LateralThinker",
+            return_value=mock_thinker,
+        ):
+            result = await handler.handle(
+                {
+                    "problem_context": "tool crashes when optional arg is null",
+                    "current_approach": "call ouroboros_lateral_think without failed_attempts",
+                    "failed_attempts": None,
+                }
+            )
+
+        assert result.is_ok
+        mock_thinker.generate_alternative.assert_called_once_with(
+            persona=ThinkingPersona.CONTRARIAN,
+            problem_context="tool crashes when optional arg is null",
+            current_approach="call ouroboros_lateral_think without failed_attempts",
+            failed_attempts=(),
+        )
+
+    async def test_handle_filters_falsey_failed_attempts_entries(self) -> None:
+        """Falsy entries should be dropped while valid entries are stringified."""
+        handler = LateralThinkHandler()
+
+        mock_lateral_result = MagicMock(
+            approach_summary="Try a different angle",
+            prompt="Consider an alternative path",
+            questions=("What assumption can you invert?",),
+            persona=MagicMock(value="architect"),
+        )
+        mock_thinker = MagicMock()
+        mock_thinker.generate_alternative.return_value = Result.ok(mock_lateral_result)
+
+        with patch(
+            "ouroboros.resilience.lateral.LateralThinker",
+            return_value=mock_thinker,
+        ):
+            result = await handler.handle(
+                {
+                    "problem_context": "problem",
+                    "current_approach": "approach",
+                    "persona": "architect",
+                    "failed_attempts": ["first", None, "", 7],
+                }
+            )
+
+        assert result.is_ok
+        mock_thinker.generate_alternative.assert_called_once_with(
+            persona=ThinkingPersona.ARCHITECT,
+            problem_context="problem",
+            current_approach="approach",
+            failed_attempts=("first", "7"),
+        )
 
 
 class TestMeasureDriftHandler:
@@ -1412,21 +1510,78 @@ class TestInterviewHandlerCwd:
         mock_engine.start_interview.assert_awaited_once()
         call_kwargs = mock_engine.start_interview.call_args
         assert call_kwargs[1]["cwd"] == str(tmp_path)
-        assert "(ambiguity: 0.67) First question?" in result.value.content[0].text
+        # Scoring is now skipped on interview start (0 answered rounds cannot
+        # trigger early completion), so the question appears without an
+        # ambiguity prefix.  See https://github.com/Q00/ouroboros/issues/283
+        assert "First question?" in result.value.content[0].text
+
+    async def test_interview_handle_resolves_pm_seed_paths(self, tmp_path) -> None:
+        """initial_context paths should load PMSeed content before starting the interview."""
+        seed_path = tmp_path / "pm_seed_taskflow.json"
+        seed_path.write_text(
+            """{
+  "pm_id": "pm_seed_taskflow",
+  "product_name": "TaskFlow",
+  "goal": "Help teams manage tasks",
+  "constraints": ["Offline support"],
+  "success_criteria": ["Tasks sync correctly"],
+  "user_stories": [],
+  "deferred_items": [],
+  "decide_later_items": []
+}
+""",
+            encoding="utf-8",
+        )
+
+        mock_engine = MagicMock()
+        mock_state = MagicMock()
+        mock_state.interview_id = "test-123"
+        mock_state.rounds = []
+        mock_state.mark_updated = MagicMock()
+        mock_engine.start_interview = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False, value=mock_state)
+        )
+        mock_engine.ask_next_question = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False, value="First question?")
+        )
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+        mock_score = create_mock_live_ambiguity_score(0.67, seed_ready=False)
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
+
+        handler = InterviewHandler(interview_engine=mock_engine, llm_adapter=MagicMock())
+        with patch(
+            "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer",
+            return_value=mock_scorer,
+        ):
+            result = await handler.handle({"initial_context": str(seed_path), "cwd": str(tmp_path)})
+
+        assert result.is_ok
+        resolved_context = mock_engine.start_interview.call_args.args[0]
+        assert "TaskFlow" in resolved_context
+        assert str(seed_path) not in resolved_context
 
     async def test_interview_handle_clears_stored_ambiguity_after_new_answer(self) -> None:
-        """Interview answers should refresh the ambiguity snapshot after rescoring."""
+        """Interview answers should refresh the ambiguity snapshot after rescoring.
+
+        Scoring only runs when answered rounds >= MIN_ROUNDS_BEFORE_EARLY_EXIT
+        (currently 3), so this test creates enough answered rounds to cross
+        the threshold.  See https://github.com/Q00/ouroboros/issues/283
+        """
         handler = InterviewHandler(llm_adapter=MagicMock())
         state = InterviewState(
             interview_id="sess-123",
             ambiguity_score=0.14,
             ambiguity_breakdown={"goal_clarity": {"name": "goal_clarity"}},
             rounds=[
+                InterviewRound(round_number=1, question="Q1?", user_response="A1"),
+                InterviewRound(round_number=2, question="Q2?", user_response="A2"),
+                InterviewRound(round_number=3, question="Q3?", user_response="A3"),
                 InterviewRound(
-                    round_number=1,
+                    round_number=4,
                     question="What should it do?",
                     user_response=None,
-                )
+                ),
             ],
         )
         mock_engine = MagicMock()
@@ -1560,7 +1715,10 @@ class TestInterviewHandlerCwd:
         assert result.value.meta["completed"] is True
         assert result.value.meta["ambiguity_score"] == 0.18
         assert "(ambiguity: 0.18) Ready for Seed generation." in result.value.content[0].text
-        mock_engine.ask_next_question.assert_not_called()
+        # With parallel execution (asyncio.gather), ask_next_question runs
+        # concurrently alongside scoring.  Its result is discarded when
+        # completion triggers.  See https://github.com/Q00/ouroboros/issues/286
+        mock_engine.ask_next_question.assert_called_once()
 
 
 class TestGenerateSeedHandlerAmbiguity:
@@ -1694,6 +1852,59 @@ class TestGenerateSeedHandlerAmbiguity:
         generate_call = mock_seed_generator.generate.await_args
         assert generate_call.args[1].overall_score == 0.11
 
+    async def test_generate_seed_ignores_caller_ambiguity_score_override(self) -> None:
+        """Caller-supplied ambiguity_score must be ignored to prevent LLM gate bypass.
+
+        Regression test for https://github.com/Q00/ouroboros/issues/210
+        """
+        state = InterviewState(
+            interview_id="sess-bypass",
+            initial_context="Build something",
+            ambiguity_score=0.35,
+            ambiguity_breakdown={
+                "goal_clarity": {
+                    "name": "goal_clarity",
+                    "clarity_score": 0.65,
+                    "weight": 0.4,
+                    "justification": "Vague goal",
+                },
+                "constraint_clarity": {
+                    "name": "constraint_clarity",
+                    "clarity_score": 0.65,
+                    "weight": 0.3,
+                    "justification": "Vague constraints",
+                },
+                "success_criteria_clarity": {
+                    "name": "success_criteria_clarity",
+                    "clarity_score": 0.65,
+                    "weight": 0.3,
+                    "justification": "Vague success criteria",
+                },
+            },
+        )
+        mock_adapter = MagicMock()
+        mock_interview_engine = MagicMock()
+        mock_interview_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_seed_generator = MagicMock()
+        mock_seed_generator.generate = AsyncMock(return_value=Result.err(RuntimeError("boom")))
+        handler = GenerateSeedHandler(
+            llm_adapter=mock_adapter,
+            interview_engine=mock_interview_engine,
+            seed_generator=mock_seed_generator,
+        )
+
+        # LLM tries to pass ambiguity_score=0.18 to bypass the gate
+        await handler.handle(
+            {
+                "session_id": "sess-bypass",
+                "ambiguity_score": 0.18,
+            }
+        )
+
+        # The stored score (0.35) should be used, NOT the caller's 0.18
+        generate_call = mock_seed_generator.generate.await_args
+        assert generate_call.args[1].overall_score == 0.35
+
 
 class TestCancelExecutionHandler:
     """Test CancelExecutionHandler class."""
@@ -1747,24 +1958,23 @@ class TestCancelExecutionHandler:
         assert result.is_err
         assert "execution_id is required" in str(result.error)
 
-    async def test_handle_not_found(self) -> None:
+    async def test_handle_not_found(self, memory_event_store: EventStore) -> None:
         """handle returns error when execution does not exist."""
-        handler = CancelExecutionHandler()
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle({"execution_id": "nonexistent-id"})
 
         assert result.is_err
         assert "not found" in str(result.error).lower() or "no events" in str(result.error).lower()
 
-    async def test_handle_cancels_running_session(self) -> None:
+    async def test_handle_cancels_running_session(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """handle successfully cancels a running session."""
         from ouroboros.orchestrator.session import SessionRepository, SessionStatus
-        from ouroboros.persistence.event_store import EventStore
-
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
 
         # Create a running session via the repository
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         create_result = await repo.create_session(
             execution_id="exec_cancel_123",
             seed_id="test-seed",
@@ -1773,7 +1983,7 @@ class TestCancelExecutionHandler:
         assert create_result.is_ok
 
         # Now cancel via handler (passing execution_id, not session_id)
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle(
             {
                 "execution_id": "exec_cancel_123",
@@ -1794,15 +2004,14 @@ class TestCancelExecutionHandler:
         assert reconstructed.is_ok
         assert reconstructed.value.status == SessionStatus.CANCELLED
 
-    async def test_handle_rejects_completed_session(self) -> None:
+    async def test_handle_rejects_completed_session(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """handle returns error when session is already completed."""
         from ouroboros.orchestrator.session import SessionRepository
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         await repo.create_session(
             execution_id="exec_completed_123",
             seed_id="test-seed",
@@ -1810,22 +2019,21 @@ class TestCancelExecutionHandler:
         )
         await repo.mark_completed("orch_completed_123")
 
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle({"execution_id": "exec_completed_123"})
 
         assert result.is_err
         assert "terminal state" in str(result.error).lower()
         assert "completed" in str(result.error).lower()
 
-    async def test_handle_rejects_failed_session(self) -> None:
+    async def test_handle_rejects_failed_session(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """handle returns error when session has already failed."""
         from ouroboros.orchestrator.session import SessionRepository
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         await repo.create_session(
             execution_id="exec_failed_123",
             seed_id="test-seed",
@@ -1833,22 +2041,21 @@ class TestCancelExecutionHandler:
         )
         await repo.mark_failed("orch_failed_123", error_message="some error")
 
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle({"execution_id": "exec_failed_123"})
 
         assert result.is_err
         assert "terminal state" in str(result.error).lower()
         assert "failed" in str(result.error).lower()
 
-    async def test_handle_rejects_already_cancelled_session(self) -> None:
+    async def test_handle_rejects_already_cancelled_session(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """handle returns error when session is already cancelled."""
         from ouroboros.orchestrator.session import SessionRepository
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         await repo.create_session(
             execution_id="exec_cancelled_123",
             seed_id="test-seed",
@@ -1856,50 +2063,45 @@ class TestCancelExecutionHandler:
         )
         await repo.mark_cancelled("orch_cancelled_123", reason="first cancel")
 
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle({"execution_id": "exec_cancelled_123"})
 
         assert result.is_err
         assert "terminal state" in str(result.error).lower()
         assert "cancelled" in str(result.error).lower()
 
-    async def test_handle_default_reason(self) -> None:
+    async def test_handle_default_reason(self, memory_event_store: EventStore) -> None:
         """handle uses default reason when none provided."""
         from ouroboros.orchestrator.session import SessionRepository
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         await repo.create_session(
             execution_id="exec_default_reason_123",
             seed_id="test-seed",
             session_id="orch_default_reason_123",
         )
 
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle({"execution_id": "exec_default_reason_123"})
 
         assert result.is_ok
         assert result.value.meta["reason"] == "Cancelled by user"
 
-    async def test_handle_cancel_idempotent_state_after_cancel(self) -> None:
+    async def test_handle_cancel_idempotent_state_after_cancel(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """Cancellation is reflected in event store; second cancel attempt rejected."""
         from ouroboros.orchestrator.session import SessionRepository
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         await repo.create_session(
             execution_id="exec_double_cancel_123",
             seed_id="test-seed",
             session_id="orch_double_cancel_123",
         )
 
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
 
         # First cancel succeeds
         result1 = await handler.handle(
@@ -1920,22 +2122,21 @@ class TestCancelExecutionHandler:
         assert result2.is_err
         assert "terminal state" in str(result2.error).lower()
 
-    async def test_handle_cancel_preserves_execution_id_in_response(self) -> None:
+    async def test_handle_cancel_preserves_execution_id_in_response(
+        self,
+        memory_event_store: EventStore,
+    ) -> None:
         """Cancellation response meta contains all expected fields."""
         from ouroboros.orchestrator.session import SessionRepository
-        from ouroboros.persistence.event_store import EventStore
 
-        event_store = EventStore("sqlite+aiosqlite:///:memory:")
-        await event_store.initialize()
-
-        repo = SessionRepository(event_store)
+        repo = SessionRepository(memory_event_store)
         await repo.create_session(
             execution_id="exec_meta_fields_123",
             seed_id="test-seed",
             session_id="orch_meta_fields_123",
         )
 
-        handler = CancelExecutionHandler(event_store=event_store)
+        handler = CancelExecutionHandler(event_store=memory_event_store)
         result = await handler.handle(
             {
                 "execution_id": "exec_meta_fields_123",
@@ -2006,3 +2207,57 @@ class TestStartExecuteSeedHandlerBackendPropagation:
         inner = handler._execute_handler
         assert inner.agent_runtime_backend is None
         assert inner.llm_backend is None
+
+    @pytest.mark.asyncio
+    async def test_handle_monitoring_message_prefers_ac_tree_hud(self) -> None:
+        mock_execute_handler = MagicMock(spec=ExecuteSeedHandler)
+        mock_execute_handler.agent_runtime_backend = "codex"
+        mock_execute_handler.llm_backend = "codex"
+        mock_execute_handler.handle = AsyncMock()
+
+        mock_event_store = AsyncMock()
+        mock_event_store.initialize = AsyncMock()
+
+        created_at = datetime.now(UTC)
+        snapshot = JobSnapshot(
+            job_id="job_test123",
+            job_type="execute_seed",
+            status=JobStatus.QUEUED,
+            message="Queued seed execution",
+            created_at=created_at,
+            updated_at=created_at,
+            cursor=17,
+            links=JobLinks(
+                session_id="orch_test123",
+                execution_id="exec_test123",
+            ),
+        )
+        mock_job_manager = AsyncMock()
+        mock_job_manager.start_job = AsyncMock(return_value=snapshot)
+
+        handler = StartExecuteSeedHandler(
+            execute_handler=mock_execute_handler,
+            event_store=mock_event_store,
+            job_manager=mock_job_manager,
+        )
+
+        with (
+            patch(
+                "ouroboros.orchestrator.runtime_factory.resolve_agent_runtime_backend",
+                return_value="codex",
+            ),
+            patch(
+                "ouroboros.providers.factory.resolve_llm_backend",
+                return_value="codex",
+            ),
+        ):
+            result = await handler.handle({"seed_content": VALID_SEED_YAML})
+
+        assert result.is_ok
+        text = result.value.text_content
+        assert "ouroboros_ac_tree_hud(session_id, cursor)" in text
+        assert "ouroboros_job_result(job_id)" in text
+        assert "ouroboros_job_wait" not in text
+        start_job_call = mock_job_manager.start_job.await_args
+        runner = start_job_call.kwargs["runner"]
+        runner.close()

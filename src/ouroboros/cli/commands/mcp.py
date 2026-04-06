@@ -29,6 +29,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
 
     CLAUDE = "claude"
     CODEX = "codex"
+    OPENCODE = "opencode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -37,6 +38,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     CLAUDE_CODE = "claude_code"
     LITELLM = "litellm"
     CODEX = "codex"
+    OPENCODE = "opencode"
 
 
 def _write_pid_file() -> bool:
@@ -155,6 +157,21 @@ async def _run_mcp_server(
         # Auto-cleanup is best-effort — don't prevent server from starting
         _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
 
+    # Auto-discover and connect MCP bridge for server-to-server communication
+    from ouroboros.mcp.bridge import create_bridge_from_env
+
+    mcp_bridge = create_bridge_from_env(cwd=Path.cwd())
+    if mcp_bridge is not None:
+        try:
+            results = await mcp_bridge.connect()
+            connected = sum(1 for r in results.values() if r.is_ok)
+            _stderr_console.print(
+                f"[blue]MCP Bridge: {connected}/{len(results)} upstream server(s) connected[/blue]"
+            )
+        except Exception as e:
+            _stderr_console.print(f"[yellow]MCP Bridge connection failed: {e}[/yellow]")
+            mcp_bridge = None
+
     # Create server with all tools pre-registered via dependency injection.
     # Do NOT re-register OUROBOROS_TOOLS here — create_ouroboros_server already
     # registers handlers with proper dependencies (event_store, llm_adapter, etc.).
@@ -164,6 +181,7 @@ async def _run_mcp_server(
         event_store=event_store,
         runtime_backend=runtime_backend,
         llm_backend=llm_backend,
+        mcp_bridge=mcp_bridge,
     )
 
     tool_count = len(server.info.tools)
@@ -246,7 +264,7 @@ def serve(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude or codex).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, or opencode).",
             case_sensitive=False,
         ),
     ] = None,
@@ -255,7 +273,7 @@ def serve(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, or codex)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, or opencode)."
             ),
             case_sensitive=False,
         ),
@@ -280,8 +298,8 @@ def serve(
         # Start with SSE transport on custom port
         ouroboros mcp serve --transport sse --port 9000
 
-        # Start with Codex runtime for orchestrator-driven tools
-        ouroboros mcp serve --runtime codex
+        # Start with OpenCode runtime
+        ouroboros mcp serve --runtime opencode
 
         # Use Codex CLI for LLM-only tools as well
         ouroboros mcp serve --runtime codex --llm-backend codex
@@ -333,7 +351,7 @@ def info(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude or codex).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, or opencode).",
             case_sensitive=False,
         ),
     ] = None,
@@ -342,7 +360,7 @@ def info(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, or codex)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, or opencode)."
             ),
             case_sensitive=False,
         ),

@@ -51,6 +51,39 @@ def validate_transport(transport: str) -> str:
     return transport
 
 
+def _extract_feedback_metadata_from_artifact(artifact: str) -> tuple[Any, ...]:
+    """Extract structured feedback metadata emitted inside execution artifacts."""
+    import json
+    import re
+
+    from ouroboros.core.lineage import FeedbackMetadata
+
+    matches = re.findall(r"^Feedback Metadata JSON:\s*(\{.+\})$", artifact, flags=re.MULTILINE)
+    if not matches:
+        return ()
+
+    feedback_items: list[FeedbackMetadata] = []
+    for payload in matches:
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+
+        raw_feedback = parsed.get("feedback_metadata")
+        if not isinstance(raw_feedback, list):
+            continue
+
+        for item in raw_feedback:
+            if not isinstance(item, dict):
+                continue
+            try:
+                feedback_items.append(FeedbackMetadata.model_validate(item))
+            except Exception:
+                continue
+
+    return tuple(feedback_items)
+
+
 # Map MCPToolParameter types to Python annotations for FastMCP schema inference.
 _TOOL_TYPE_MAP: dict[ToolInputType, type] = {
     ToolInputType.STRING: str,
@@ -96,6 +129,30 @@ def _build_tool_signature(parameters: tuple[MCPToolParameter, ...]) -> inspect.S
     return inspect.Signature(parameters=sig_params)
 
 
+_PROJECT_ROOT_MARKERS = (
+    # VCS (most universal — nearly every project has one)
+    ".git",
+    # Python
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    # Node.js
+    "package.json",
+    # Rust
+    "Cargo.toml",
+    # Go
+    "go.mod",
+    # Java / Kotlin
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    # Ruby
+    "Gemfile",
+    # PHP
+    "composer.json",
+)
+
+
 def _looks_like_project_root(path: object) -> bool:
     """Return True when the given path looks like a project root."""
     from pathlib import Path
@@ -103,11 +160,7 @@ def _looks_like_project_root(path: object) -> bool:
     if not isinstance(path, Path):
         return False
 
-    return (
-        (path / "pyproject.toml").exists()
-        or (path / "setup.py").exists()
-        or (path / "package.json").exists()
-    )
+    return any((path / marker).exists() for marker in _PROJECT_ROOT_MARKERS)
 
 
 def _project_dir_from_seed(seed: Any) -> str | None:
@@ -143,11 +196,15 @@ def _project_dir_from_seed(seed: Any) -> str | None:
 
 
 def _project_dir_from_artifact(artifact: str) -> str | None:
-    """Extract a likely project root from Write/Edit tool output."""
+    """Extract a likely project root from Write/Edit/File tool output."""
     from pathlib import Path
     import re
 
-    write_matches = re.findall(r"(?:Write|Edit): (/[^\s]+)", artifact)
+    # Match quoted paths (spaces allowed) or unquoted paths (no spaces).
+    # Examples:  Write: /foo/bar.py  |  File: "/path with spaces/bar.py"
+    write_matches: list[str] = []
+    for m in re.finditer(r'(?:Write|Edit|File): (?:"([^"]+)"|(/[^\s]+))', artifact):
+        write_matches.append(m.group(1) or m.group(2))
     for path_str in write_matches:
         candidate = Path(path_str).parent
         for _ in range(10):
@@ -444,7 +501,7 @@ class MCPServerAdapter:
         try:
             from mcp.server.fastmcp import FastMCP
         except ImportError as e:
-            msg = "mcp package not installed. Install with: pip install mcp"
+            msg = "mcp package not installed. Install with: pip install 'ouroboros-ai[mcp]'"
             raise ImportError(msg) from e
 
         # Pass host/port at construction time — FastMCP reads these from
@@ -569,6 +626,7 @@ def create_ouroboros_server(
     state_dir: Any | None = None,
     runtime_backend: str | None = None,
     llm_backend: str | None = None,
+    mcp_bridge: Any | None = None,
 ) -> MCPServerAdapter:
     """Create an Ouroboros MCP server with all tools and dependencies wired.
 
@@ -654,6 +712,16 @@ def create_ouroboros_server(
 
     resolved_runtime_backend = resolve_agent_runtime_backend(runtime_backend)
 
+    # Materialize the default runtime once at server creation so backend wiring
+    # is validated up front and composition-root tests can assert the selected
+    # runtime backend without waiting for a tool invocation.
+    create_agent_runtime(
+        backend=resolved_runtime_backend,
+        model=None,
+        cwd=Path.cwd(),
+        llm_backend=llm_backend,
+    )
+
     # Create shared LLM adapter for interview/seed/evaluation paths.
     llm_adapter = create_llm_adapter(
         backend=llm_backend,
@@ -708,21 +776,8 @@ def create_ouroboros_server(
     execution_model = os.environ.get("OUROBOROS_EXECUTION_MODEL")
     if execution_model is None and resolved_runtime_backend == "claude":
         execution_model = "claude-sonnet-4-6"
-    agent_adapter = create_agent_runtime(
-        backend=resolved_runtime_backend,
-        model=execution_model,
-        cwd=Path.cwd(),
-        llm_backend=llm_backend,
-    )
     # Use stderr console: in MCP stdio mode, stdout is the JSON-RPC channel.
     # Any non-protocol output on stdout corrupts the MCP communication.
-    evolution_runner = OrchestratorRunner(
-        adapter=agent_adapter,
-        event_store=event_store,
-        console=Console(stderr=True),
-        debug=False,
-        enable_decomposition=True,
-    )
     # Stage 1 (mechanical checks: lint/build/test) can be enabled via env var.
     # Disabled by default to reduce latency per generation step.
     evolve_stage1 = os.environ.get("OUROBOROS_EVOLVE_STAGE1", "false").lower() == "true"
@@ -750,6 +805,28 @@ def create_ouroboros_server(
 
     async def _evolution_executor(seed: Any, *, parallel: bool = True) -> Any:
         await _ensure_evolution_store_initialized()
+        task_cwd = evolutionary_loop.get_project_dir()
+        runner_adapter = create_agent_runtime(
+            backend=resolved_runtime_backend,
+            model=execution_model,
+            cwd=task_cwd or Path.cwd(),
+            llm_backend=llm_backend,
+        )
+        _evo_mcp_manager = mcp_bridge.manager if mcp_bridge is not None else None
+        _evo_mcp_prefix = (
+            mcp_bridge.tool_prefix
+            if mcp_bridge is not None and hasattr(mcp_bridge, "tool_prefix")
+            else ""
+        )
+        evolution_runner = OrchestratorRunner(
+            adapter=runner_adapter,
+            event_store=event_store,
+            console=Console(stderr=True),
+            mcp_manager=_evo_mcp_manager,
+            mcp_tool_prefix=_evo_mcp_prefix,
+            debug=False,
+            enable_decomposition=True,
+        )
         return await evolution_runner.execute_seed(
             seed=seed,
             execution_id=None,
@@ -774,6 +851,7 @@ def create_ouroboros_server(
             return None
 
         seed_acs = getattr(seed, "acceptance_criteria", None) or ()
+        feedback_metadata = _extract_feedback_metadata_from_artifact(artifact)
 
         ac_results: list[ACResult] = []
         for ac_num_str, status, description in ac_line_matches:
@@ -809,6 +887,7 @@ def create_ouroboros_server(
             drift_score=1.0 - score,
             failure_reason=failure_reason,
             ac_results=tuple(ac_results),
+            feedback_metadata=feedback_metadata,
         )
 
     spec_extractor = AssertionExtractor(
@@ -1265,6 +1344,15 @@ def create_ouroboros_server(
 
     # The server owns the shared event store lifecycle
     server.register_owned_resource(event_store)
+
+    # Inject bridge into all BridgeAwareMixin handlers (loop-based auto-discovery)
+    if mcp_bridge is not None:
+        from ouroboros.mcp.tools.bridge_mixin import inject_bridge
+
+        injected = [type(h).__name__ for h in tool_handlers if inject_bridge(h, mcp_bridge)]
+        if injected:
+            log.info("mcp.bridge.injected", handlers=injected)
+        server.register_owned_resource(mcp_bridge)
 
     # Register all tools with the server
     for handler in tool_handlers:
