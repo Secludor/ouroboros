@@ -200,9 +200,7 @@ class ChannelWorkflowHandler:
         repo = arguments.get("repo")
         if not isinstance(repo, str) or not repo.strip():
             return Result.err(
-                MCPToolError(
-                    "repo is required for action=set_repo", tool_name=self.definition.name
-                )
+                MCPToolError("repo is required for action=set_repo", tool_name=self.definition.name)
             )
         self._repo_registry.set(channel, repo.strip())
         return self._ok(
@@ -346,7 +344,11 @@ class ChannelWorkflowHandler:
         normalized_message = message.strip()
         mode = str(arguments.get("mode", "auto"))
         active = self._workflow_manager.active_for_channel(channel)
-        repo = arguments.get("repo") or self._repo_registry.get(channel) or (active.repo if active else None)
+        repo = (
+            arguments.get("repo")
+            or self._repo_registry.get(channel)
+            or (active.repo if active else None)
+        )
         if not isinstance(repo, str) or not repo.strip():
             return Result.err(
                 MCPToolError(
@@ -367,8 +369,12 @@ class ChannelWorkflowHandler:
             message=normalized_message,
             repo=repo,
             entry_point=detection.entry_point,
-            message_id=(str(arguments["message_id"]) if arguments.get("message_id") is not None else None),
-            event_id=(str(arguments["event_id"]) if arguments.get("event_id") is not None else None),
+            message_id=(
+                str(arguments["message_id"]) if arguments.get("message_id") is not None else None
+            ),
+            event_id=(
+                str(arguments["event_id"]) if arguments.get("event_id") is not None else None
+            ),
         )
         if duplicate is not None:
             return self._ok(
@@ -394,6 +400,18 @@ class ChannelWorkflowHandler:
         ):
             return await self._runtime.resume_interview(active, normalized_message)
 
+        if mode == "answer":
+            return self._ok(
+                "No active interview to answer. Start a new workflow first.",
+                self._meta(
+                    action="answer",
+                    channel_key=channel.key,
+                    stage="idle",
+                    repo=repo,
+                ),
+                is_error=True,
+            )
+
         record = self._workflow_manager.enqueue(
             ChannelWorkflowRequest(
                 channel=channel,
@@ -403,8 +421,14 @@ class ChannelWorkflowHandler:
                 seed_content=arguments.get("seed_content"),
                 seed_path=arguments.get("seed_path"),
                 entry_point=detection.entry_point,
-                message_id=(str(arguments["message_id"]) if arguments.get("message_id") is not None else None),
-                event_id=(str(arguments["event_id"]) if arguments.get("event_id") is not None else None),
+                message_id=(
+                    str(arguments["message_id"])
+                    if arguments.get("message_id") is not None
+                    else None
+                ),
+                event_id=(
+                    str(arguments["event_id"]) if arguments.get("event_id") is not None else None
+                ),
             )
         )
         if active is not None:

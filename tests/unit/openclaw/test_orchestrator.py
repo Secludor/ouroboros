@@ -149,7 +149,11 @@ async def test_orchestrator_deduplicates_identical_wait_messages() -> None:
     )
 
     assert result.is_ok
-    assert [text for text, _ in sink.messages] == ["Execution started", "Done"]
+    assert [text for text, _ in sink.messages] == [
+        "Execution started",
+        "Execution started",
+        "Done",
+    ]
 
 
 @pytest.mark.asyncio

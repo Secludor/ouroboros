@@ -228,7 +228,9 @@ class ChannelRepoRegistry:
 class ChannelWorkflowManager:
     """Manage per-channel active workflows and queued requests."""
 
-    def __init__(self, state_path: Path | None = None, store: OpenClawStateStore | None = None) -> None:
+    def __init__(
+        self, state_path: Path | None = None, store: OpenClawStateStore | None = None
+    ) -> None:
         self._store = store or OpenClawStateStore(state_path)
 
     def enqueue(self, request: ChannelWorkflowRequest) -> ChannelWorkflowRecord:
@@ -275,6 +277,10 @@ class ChannelWorkflowManager:
 
     def latest_for_channel(self, channel: ChannelRef) -> ChannelWorkflowRecord | None:
         row = self._store.latest_for_channel(channel.key)
+        return ChannelWorkflowRecord.from_json(row) if row is not None else None
+
+    def latest_terminal_for_channel(self, channel: ChannelRef) -> ChannelWorkflowRecord | None:
+        row = self._store.latest_terminal_for_channel(channel.key)
         return ChannelWorkflowRecord.from_json(row) if row is not None else None
 
     def active_for_channel(self, channel: ChannelRef) -> ChannelWorkflowRecord | None:
@@ -425,9 +431,7 @@ def render_stage_message(record: ChannelWorkflowRecord) -> str:
         )
     if record.stage == WorkflowStage.SEED_GENERATION:
         return (
-            "🧬 Seed generated\n"
-            f"- Workflow: {record.workflow_id}\n"
-            "- Next step: preparing execution"
+            f"🧬 Seed generated\n- Workflow: {record.workflow_id}\n- Next step: preparing execution"
         )
     if record.stage == WorkflowStage.EXECUTING:
         return (
@@ -440,11 +444,7 @@ def render_stage_message(record: ChannelWorkflowRecord) -> str:
         return render_result_message(record)
     if record.stage == WorkflowStage.FAILED:
         error = record.error or "Unknown failure"
-        return (
-            "❌ Workflow failed\n"
-            f"- Workflow: {record.workflow_id}\n"
-            f"- Error: {error}"
-        )
+        return f"❌ Workflow failed\n- Workflow: {record.workflow_id}\n- Error: {error}"
     return f"Workflow {record.workflow_id} stage: {record.stage}"
 
 
@@ -459,17 +459,11 @@ def render_result_message(record: ChannelWorkflowRecord) -> str:
             )
         if record.final_result:
             return (
-                "✅ Workflow completed\n"
-                f"- Workflow: {record.workflow_id}\n\n"
-                f"{record.final_result}"
+                f"✅ Workflow completed\n- Workflow: {record.workflow_id}\n\n{record.final_result}"
             )
         return f"✅ Workflow completed\n- Workflow: {record.workflow_id}"
     error = record.error or "Unknown failure"
-    return (
-        "❌ Workflow failed\n"
-        f"- Workflow: {record.workflow_id}\n"
-        f"- Error: {error}"
-    )
+    return f"❌ Workflow failed\n- Workflow: {record.workflow_id}\n- Error: {error}"
 
 
 def render_channel_summary(
@@ -495,8 +489,8 @@ def render_channel_summary(
         lines.append(f"Queued workflows: {len(queued)}")
         for idx, record in enumerate(queued, 1):
             lines.append(f"  {idx}. {record.workflow_id} — {record.request_message[:80]}")
-    latest = manager.latest_for_channel(channel)
-    if latest is not None and latest.is_terminal:
+    latest = manager.latest_terminal_for_channel(channel)
+    if latest is not None:
         lines.extend(
             [
                 "",

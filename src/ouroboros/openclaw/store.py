@@ -103,7 +103,9 @@ class OpenClawStateStore:
             ).fetchone()
             return str(row["repo"]) if row is not None else None
 
-    def set_repo(self, *, channel_key: str, channel_id: str, guild_id: str | None, repo: str) -> None:
+    def set_repo(
+        self, *, channel_key: str, channel_id: str, guild_id: str | None, repo: str
+    ) -> None:
         with self._connection() as conn:
             conn.execute(
                 """
@@ -188,6 +190,20 @@ class OpenClawStateStore:
             ).fetchone()
             return dict(row) if row is not None else None
 
+    def latest_terminal_for_channel(self, channel_key: str) -> dict[str, Any] | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM openclaw_workflows
+                WHERE channel_key = ?
+                  AND stage IN ('completed', 'failed')
+                ORDER BY queued_at DESC
+                LIMIT 1
+                """,
+                (channel_key,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
     def active_for_channel(self, channel_key: str) -> dict[str, Any] | None:
         with self._connection() as conn:
             row = conn.execute(
@@ -215,7 +231,9 @@ class OpenClawStateStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def inflight_duplicate(self, channel_key: str, request_fingerprint: str) -> dict[str, Any] | None:
+    def inflight_duplicate(
+        self, channel_key: str, request_fingerprint: str
+    ) -> dict[str, Any] | None:
         with self._connection() as conn:
             row = conn.execute(
                 """

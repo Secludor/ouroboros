@@ -44,10 +44,13 @@ class ChannelWorkflowRuntime:
                 record = self.workflow_manager.set_interview_session(record.workflow_id, session_id)
             return Result.ok(
                 MCPToolResult(
-                    content=(MCPContentItem(type=ContentType.TEXT, text=result.value.content[0].text),),
+                    content=(
+                        MCPContentItem(type=ContentType.TEXT, text=result.value.content[0].text),
+                    ),
                     is_error=False,
                     meta=build_channel_workflow_meta(
                         action="message",
+                        channel_key=record.channel_key,
                         workflow_id=record.workflow_id,
                         stage=record.stage,
                         entry_point=record.entry_point,
@@ -79,11 +82,14 @@ class ChannelWorkflowRuntime:
         return Result.ok(
             MCPToolResult(
                 content=(
-                    MCPContentItem(type=ContentType.TEXT, text=execute_result.value.content[0].text),
+                    MCPContentItem(
+                        type=ContentType.TEXT, text=execute_result.value.content[0].text
+                    ),
                 ),
                 is_error=False,
                 meta=build_channel_workflow_meta(
                     action="message",
+                    channel_key=record.channel_key,
                     workflow_id=record.workflow_id,
                     stage=record.stage,
                     entry_point=record.entry_point,
@@ -105,7 +111,10 @@ class ChannelWorkflowRuntime:
         if next_record is None or next_record.workflow_id == previous_workflow_id:
             return None
 
-        if next_record.entry_point == WorkflowEntryPoint.INTERVIEW and next_record.interview_session_id:
+        if (
+            next_record.entry_point == WorkflowEntryPoint.INTERVIEW
+            and next_record.interview_session_id
+        ):
             return None
         if next_record.entry_point == WorkflowEntryPoint.EXECUTION and next_record.job_id:
             return None
@@ -165,7 +174,11 @@ class ChannelWorkflowRuntime:
                 )
             return Result.ok(
                 MCPToolResult(
-                    content=(MCPContentItem(type=ContentType.TEXT, text=render_result_message(completed)),),
+                    content=(
+                        MCPContentItem(
+                            type=ContentType.TEXT, text=render_result_message(completed)
+                        ),
+                    ),
                     is_error=False,
                     meta=build_channel_workflow_meta(
                         action=action,
@@ -209,7 +222,9 @@ class ChannelWorkflowRuntime:
             )
         return Result.ok(
             MCPToolResult(
-                content=(MCPContentItem(type=ContentType.TEXT, text=render_result_message(failed)),),
+                content=(
+                    MCPContentItem(type=ContentType.TEXT, text=render_result_message(failed)),
+                ),
                 is_error=False,
                 meta=build_channel_workflow_meta(
                     action=action,
@@ -247,9 +262,7 @@ class ChannelWorkflowRuntime:
                 seed_yaml = extract_seed_yaml(seed_text)
             except ValueError as exc:
                 self.workflow_manager.mark_failed(record.workflow_id, error=str(exc))
-                return Result.err(
-                    MCPToolError(str(exc), tool_name="ouroboros_channel_workflow")
-                )
+                return Result.err(MCPToolError(str(exc), tool_name="ouroboros_channel_workflow"))
             self.workflow_manager.set_seed(
                 record.workflow_id,
                 seed_id=seed_result.value.meta.get("seed_id"),
@@ -262,7 +275,9 @@ class ChannelWorkflowRuntime:
                 }
             )
             if execute_result.is_err:
-                self.workflow_manager.mark_failed(record.workflow_id, error=str(execute_result.error))
+                self.workflow_manager.mark_failed(
+                    record.workflow_id, error=str(execute_result.error)
+                )
                 return Result.err(execute_result.error)
             execute_meta = execute_result.value.meta
             executing = self.workflow_manager.set_executing(
@@ -278,6 +293,7 @@ class ChannelWorkflowRuntime:
                     is_error=False,
                     meta=build_channel_workflow_meta(
                         action="message",
+                        channel_key=record.channel_key,
                         workflow_id=executing.workflow_id,
                         stage=executing.stage,
                         seed_id=seed_result.value.meta.get("seed_id"),
@@ -295,6 +311,7 @@ class ChannelWorkflowRuntime:
                 is_error=False,
                 meta=build_channel_workflow_meta(
                     action="message",
+                    channel_key=record.channel_key,
                     workflow_id=record.workflow_id,
                     stage=record.stage,
                     session_id=record.interview_session_id,

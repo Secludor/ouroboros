@@ -25,6 +25,7 @@ class OpenClawReplySink(Protocol):
         """Send a reply back to the originating channel."""
         ...
 
+
 @dataclass
 class OpenClawWorkflowOrchestrator:
     """Coordinate an adapter call plus change-driven waiting for updates."""
@@ -68,6 +69,7 @@ class OpenClawWorkflowOrchestrator:
     ) -> Result[OpenClawAdapterResponse | None, MCPClientError]:
         """Wait for workflow changes until execution settles."""
         last_text: str | None = initial.reply_text
+        last_meta: dict[str, Any] = initial.meta
         last_response: OpenClawAdapterResponse | None = initial
 
         for _ in range(self.max_waits):
@@ -82,7 +84,7 @@ class OpenClawWorkflowOrchestrator:
 
             response = wait_result.value
             last_response = response
-            if response.reply_text != last_text:
+            if response.reply_text != last_text or response.meta != last_meta:
                 await sink.send_reply(
                     channel_id=event.channel_id,
                     guild_id=event.guild_id,
@@ -90,6 +92,7 @@ class OpenClawWorkflowOrchestrator:
                     meta=response.meta,
                 )
                 last_text = response.reply_text
+                last_meta = response.meta
 
             if not self._needs_wait(response):
                 return Result.ok(response)
