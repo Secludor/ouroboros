@@ -4,12 +4,15 @@ Provides async methods for appending and replaying events using SQLAlchemy Core
 with aiosqlite backend.
 """
 
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Mapping
+from dataclasses import dataclass
 import logging
 from pathlib import Path
 
-from sqlalchemy import event, or_, select, text
+from sqlalchemy import and_, event, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from ouroboros.core.errors import PersistenceError
@@ -439,6 +442,147 @@ class EventStore:
                 details={"event_type": "orchestrator.session.%"},
             ) from e
 
+    async def get_session_activity_snapshots(self) -> list[SessionActivitySnapshot]:
+        """Return one session snapshot row per session aggregate.
+
+        The snapshot includes session identity from the start event, the most
+        recent session activity timestamp, and the latest status-bearing event
+        or runtime_status payload when present. This avoids replaying every
+        event for every session just to detect stale active sessions.
+        """
+        if self._engine is None:
+            raise PersistenceError(
+                "EventStore not initialized. Call initialize() first.",
+                operation="get_session_activity_snapshots",
+            )
+
+        status_expr = func.coalesce(
+            func.json_extract(events_table.c.payload, "$.progress.runtime_status"),
+            func.json_extract(events_table.c.payload, "$.runtime_status"),
+        )
+
+        started_ranked = (
+            select(
+                events_table.c.aggregate_id.label("session_id"),
+                func.json_extract(events_table.c.payload, "$.execution_id").label("execution_id"),
+                func.json_extract(events_table.c.payload, "$.seed_id").label("seed_id"),
+                func.json_extract(events_table.c.payload, "$.start_time").label("start_time"),
+                func.row_number()
+                .over(
+                    partition_by=events_table.c.aggregate_id,
+                    order_by=(events_table.c.timestamp.asc(), events_table.c.id.asc()),
+                )
+                .label("rn"),
+            )
+            .where(events_table.c.aggregate_type == "session")
+            .where(events_table.c.event_type == "orchestrator.session.started")
+            .subquery()
+        )
+
+        latest_activity_ranked = (
+            select(
+                events_table.c.aggregate_id.label("session_id"),
+                events_table.c.timestamp.label("last_activity"),
+                func.row_number()
+                .over(
+                    partition_by=events_table.c.aggregate_id,
+                    order_by=(events_table.c.timestamp.desc(), events_table.c.id.desc()),
+                )
+                .label("rn"),
+            )
+            .where(events_table.c.aggregate_type == "session")
+            .subquery()
+        )
+
+        latest_status_ranked = (
+            select(
+                events_table.c.aggregate_id.label("session_id"),
+                events_table.c.event_type.label("status_event_type"),
+                status_expr.label("runtime_status"),
+                func.row_number()
+                .over(
+                    partition_by=events_table.c.aggregate_id,
+                    order_by=(events_table.c.timestamp.desc(), events_table.c.id.desc()),
+                )
+                .label("rn"),
+            )
+            .where(events_table.c.aggregate_type == "session")
+            .where(
+                or_(
+                    events_table.c.event_type.in_(
+                        (
+                            "orchestrator.session.completed",
+                            "orchestrator.session.failed",
+                            "orchestrator.session.paused",
+                            "orchestrator.session.cancelled",
+                        )
+                    ),
+                    and_(
+                        events_table.c.event_type.in_(
+                            (
+                                "orchestrator.progress.updated",
+                                "workflow.progress.updated",
+                            )
+                        ),
+                        status_expr.is_not(None),
+                    ),
+                )
+            )
+            .subquery()
+        )
+
+        try:
+            async with self._engine.begin() as conn:
+                query = (
+                    select(
+                        started_ranked.c.session_id,
+                        started_ranked.c.execution_id,
+                        started_ranked.c.seed_id,
+                        started_ranked.c.start_time,
+                        latest_activity_ranked.c.last_activity,
+                        latest_status_ranked.c.status_event_type,
+                        latest_status_ranked.c.runtime_status,
+                    )
+                    .select_from(started_ranked)
+                    .join(
+                        latest_activity_ranked,
+                        and_(
+                            latest_activity_ranked.c.session_id == started_ranked.c.session_id,
+                            latest_activity_ranked.c.rn == 1,
+                        ),
+                    )
+                    .outerjoin(
+                        latest_status_ranked,
+                        and_(
+                            latest_status_ranked.c.session_id == started_ranked.c.session_id,
+                            latest_status_ranked.c.rn == 1,
+                        ),
+                    )
+                    .where(started_ranked.c.rn == 1)
+                    .order_by(started_ranked.c.session_id.asc())
+                )
+
+                result = await conn.execute(query)
+                rows = result.mappings().all()
+                return [
+                    SessionActivitySnapshot(
+                        session_id=row["session_id"],
+                        execution_id=row.get("execution_id"),
+                        seed_id=row.get("seed_id"),
+                        start_time=row.get("start_time"),
+                        last_activity=row.get("last_activity"),
+                        status_event_type=row.get("status_event_type"),
+                        runtime_status=row.get("runtime_status"),
+                    )
+                    for row in rows
+                ]
+        except Exception as e:
+            raise PersistenceError(
+                f"Failed to fetch session activity snapshots: {e}",
+                operation="select",
+                table="events",
+            ) from e
+
     async def query_events(
         self,
         aggregate_id: str | None = None,
@@ -666,3 +810,16 @@ class EventStore:
         if self._engine is not None:
             await self._engine.dispose()
             self._engine = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionActivitySnapshot:
+    """Session start/activity/status summary used by orphan detection."""
+
+    session_id: str
+    execution_id: str | None
+    seed_id: str | None
+    start_time: str | None
+    last_activity: object
+    status_event_type: str | None
+    runtime_status: str | None

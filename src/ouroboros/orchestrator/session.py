@@ -34,7 +34,7 @@ from ouroboros.events.base import BaseEvent, sanitize_event_data_for_persistence
 from ouroboros.observability.logging import get_logger
 
 if TYPE_CHECKING:
-    from ouroboros.persistence.event_store import EventStore
+    from ouroboros.persistence.event_store import EventStore, SessionActivitySnapshot
 
 log = get_logger(__name__)
 
@@ -351,6 +351,70 @@ class SessionRepository:
             progress["messages_processed"] = messages_count
 
         return progress
+
+    @staticmethod
+    def _coerce_snapshot_datetime(value: object) -> datetime | None:
+        """Normalize timestamp values returned by snapshot queries."""
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=UTC)
+            return value
+        if isinstance(value, str) and value:
+            parsed = datetime.fromisoformat(value)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=UTC)
+            return parsed
+        return None
+
+    @classmethod
+    def _status_from_snapshot(cls, snapshot: SessionActivitySnapshot) -> SessionStatus:
+        """Derive session status from a snapshot row."""
+        status = cls._status_from_event(snapshot.status_event_type, {})
+        if status is not None:
+            return status
+
+        runtime_status = cls._coerce_runtime_status(snapshot.runtime_status)
+        if runtime_status is not None:
+            return runtime_status
+
+        return SessionStatus.RUNNING
+
+    async def _find_orphaned_sessions_via_snapshots(
+        self,
+        snapshots: list[SessionActivitySnapshot],
+        alive_sessions: set[str],
+        staleness_threshold: timedelta,
+        now: datetime,
+    ) -> list[SessionTracker]:
+        """Detect orphaned sessions from pre-aggregated session snapshots."""
+        orphaned: list[SessionTracker] = []
+
+        for snapshot in snapshots:
+            status = self._status_from_snapshot(snapshot)
+            if status not in (SessionStatus.RUNNING, SessionStatus.PAUSED):
+                continue
+
+            if snapshot.session_id in alive_sessions:
+                log.info(
+                    "orchestrator.orphan_detection.heartbeat_alive",
+                    session_id=snapshot.session_id,
+                )
+                continue
+
+            last_activity = self._coerce_snapshot_datetime(snapshot.last_activity)
+            if last_activity is None:
+                last_activity = self._coerce_snapshot_datetime(snapshot.start_time)
+            if last_activity is None:
+                continue
+
+            if (now - last_activity) <= staleness_threshold:
+                continue
+
+            result = await self.reconstruct_session(snapshot.session_id)
+            if result.is_ok:
+                orphaned.append(result.value)
+
+        return orphaned
 
     @staticmethod
     def _merge_event_streams(
@@ -892,6 +956,24 @@ class SessionRepository:
         orphaned: list[SessionTracker] = []
 
         try:
+            get_snapshots = getattr(self._event_store, "get_session_activity_snapshots", None)
+            if callable(get_snapshots):
+                snapshots = await get_snapshots()
+                if isinstance(snapshots, list):
+                    orphaned = await self._find_orphaned_sessions_via_snapshots(
+                        snapshots,
+                        alive_sessions,
+                        staleness_threshold,
+                        now,
+                    )
+                    log.info(
+                        "orchestrator.orphan_detection.complete",
+                        total_sessions=len(snapshots),
+                        orphaned_count=len(orphaned),
+                        strategy="snapshot",
+                    )
+                    return orphaned
+
             # Get all session start events to enumerate sessions
             start_events = await self._event_store.get_all_sessions()
 
@@ -955,6 +1037,7 @@ class SessionRepository:
                 "orchestrator.orphan_detection.complete",
                 total_sessions=len(start_events),
                 orphaned_count=len(orphaned),
+                strategy="replay",
             )
 
         except Exception as e:

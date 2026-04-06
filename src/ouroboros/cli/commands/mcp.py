@@ -138,22 +138,35 @@ async def _run_mcp_server(
     else:
         event_store = EventStore()
 
-    # Auto-cancel orphaned sessions on startup.
-    # Sessions left in RUNNING/PAUSED state for >1 hour are considered orphaned
-    # (e.g., from a previous crash). Cancel them before accepting new requests.
-    # NOTE: find_orphaned_sessions now checks for active runtime processes first,
-    # so sessions with live claude/codex agents won't be cancelled even if stale.
+    cleanup_task: asyncio.Task[None] | None = None
+
+    # Initialize the event store up front because the MCP server uses it for
+    # request handling. Orphan cleanup is intentionally deferred into the
+    # background so large SQLite histories do not block the initial MCP
+    # handshake on startup (#304).
     try:
         await event_store.initialize()
-        repo = SessionRepository(event_store)
-        cancelled = await repo.cancel_orphaned_sessions()
-        if cancelled:
-            _stderr_console.print(
-                f"[yellow]Auto-cancelled {len(cancelled)} orphaned session(s)[/yellow]"
-            )
     except Exception as e:
         # Auto-cleanup is best-effort — don't prevent server from starting
         _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
+    else:
+        repo = SessionRepository(event_store)
+
+        async def _run_startup_cleanup() -> None:
+            try:
+                cancelled = await repo.cancel_orphaned_sessions()
+                if cancelled:
+                    _stderr_console.print(
+                        f"[yellow]Auto-cancelled {len(cancelled)} orphaned session(s)[/yellow]"
+                    )
+            except Exception as e:
+                # Auto-cleanup is best-effort — don't prevent server startup
+                _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
+
+        cleanup_task = asyncio.create_task(
+            _run_startup_cleanup(),
+            name="ouroboros-mcp-startup-cleanup",
+        )
 
     # Auto-discover and connect MCP bridge for server-to-server communication
     from ouroboros.mcp.bridge import create_bridge_from_env
@@ -222,6 +235,12 @@ async def _run_mcp_server(
     try:
         await server.serve(transport=transport, host=host, port=port)
     finally:
+        if cleanup_task is not None and not cleanup_task.done():
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                pass
         _cleanup_pid_file()
 
 
