@@ -15,6 +15,8 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import os
+import re
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
@@ -29,6 +31,94 @@ log = get_logger(__name__)
 _MAX_KEY_OUTPUT_CHARS = 200
 # Maximum characters for the entire level context section
 _MAX_LEVEL_CONTEXT_CHARS = 2000
+# Maximum characters for public API summary per AC
+_MAX_PUBLIC_API_CHARS = 500
+
+
+def _extract_public_api(file_path: str) -> list[str]:
+    """Extract public API signatures from a source file.
+
+    Reads the file and extracts top-level public definitions:
+    - Python: class/def signatures (non-underscore prefixed)
+    - TypeScript/JS: exported functions/classes/interfaces/types
+    - Go: exported (capitalized) func/type signatures
+
+    Returns list of signature strings like:
+        ["class UserService", "def get_user(id: str) -> User"]
+    """
+    try:
+        with open(file_path) as f:
+            content = f.read()
+    except (OSError, UnicodeDecodeError):
+        return []
+
+    signatures: list[str] = []
+
+    if file_path.endswith(".py"):
+        # Extract top-level (non-indented) class and function signatures.
+        # Handles multi-line signatures by accumulating lines until parens balance.
+        lines = content.split("\n")
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            m = re.match(r"^(class|def|async\s+def)\s+(\w+)", line)
+            if m:
+                name = m.group(2)
+                if not name.startswith("_"):
+                    # Accumulate multi-line signature until parens balance
+                    sig_lines = [line.rstrip()]
+                    open_parens = line.count("(") - line.count(")")
+                    while open_parens > 0 and i + 1 < len(lines):
+                        i += 1
+                        sig_lines.append(lines[i].strip())
+                        open_parens += lines[i].count("(") - lines[i].count(")")
+                    sig = " ".join(sig_lines)
+                    # Trim trailing colon and everything after
+                    sig = re.sub(r":\s*$", "", sig)
+                    # Collapse whitespace
+                    sig = re.sub(r"\s{2,}", " ", sig).strip()
+                    signatures.append(sig)
+            i += 1
+
+    elif file_path.endswith((".ts", ".tsx", ".js", ".jsx")):
+        for m in re.finditer(
+            r"^export\s+(?:default\s+)?((?:function|class|interface|type|const|enum)\s+\w[^\n{;]*)",
+            content,
+            re.MULTILINE,
+        ):
+            signatures.append(m.group(1).strip())
+
+    elif file_path.endswith(".go"):
+        for m in re.finditer(
+            r"^((?:func|type)\s+[A-Z]\w*[^\n{]*)",
+            content,
+            re.MULTILINE,
+        ):
+            signatures.append(m.group(1).strip())
+
+    return signatures
+
+
+def _build_public_api_summary(files_modified: tuple[str, ...]) -> str:
+    """Build a public API summary across all modified files.
+
+    Returns a compact string like:
+        user_service.py: class UserService, def get_user(id: str) -> User;
+        models.py: class User
+    """
+    parts: list[str] = []
+    for file_path in files_modified:
+        if not os.path.isfile(file_path):
+            continue
+        sigs = _extract_public_api(file_path)
+        if sigs:
+            basename = os.path.basename(file_path)
+            parts.append(f"{basename}: {', '.join(sigs)}")
+
+    summary = "; ".join(parts)
+    if len(summary) > _MAX_PUBLIC_API_CHARS:
+        summary = summary[: _MAX_PUBLIC_API_CHARS - 3] + "..."
+    return summary
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +132,7 @@ class ACContextSummary:
         tools_used: Unique tool names used during execution.
         files_modified: File paths modified via Write/Edit tools.
         key_output: Truncated final message (last N chars).
+        public_api: Extracted public API signatures from modified files.
     """
 
     ac_index: int
@@ -50,6 +141,7 @@ class ACContextSummary:
     tools_used: tuple[str, ...] = field(default_factory=tuple)
     files_modified: tuple[str, ...] = field(default_factory=tuple)
     key_output: str = ""
+    public_api: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,7 +178,9 @@ class LevelContext:
                 if len(summary.files_modified) > 5:
                     files += f" (+{len(summary.files_modified) - 5} more)"
                 lines.append(f"  Files modified: {files}")
-            if summary.key_output:
+            if summary.public_api:
+                lines.append(f"  Public API: {summary.public_api}")
+            elif summary.key_output:
                 lines.append(f"  Result: {summary.key_output}")
 
         text = "\n".join(lines)
@@ -186,14 +280,18 @@ def extract_level_context(
         if final_message:
             key_output = final_message[-_MAX_KEY_OUTPUT_CHARS:].strip()
 
+        sorted_files = tuple(sorted(files_modified))
+        public_api = _build_public_api_summary(sorted_files) if success else ""
+
         summaries.append(
             ACContextSummary(
                 ac_index=ac_index,
                 ac_content=ac_content,
                 success=success,
                 tools_used=tuple(sorted(tools_used)),
-                files_modified=tuple(sorted(files_modified)),
+                files_modified=sorted_files,
                 key_output=key_output,
+                public_api=public_api,
             )
         )
 

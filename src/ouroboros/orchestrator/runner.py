@@ -81,6 +81,7 @@ from ouroboros.orchestrator.runtime_message_projection import (
 )
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus, SessionTracker
 from ouroboros.orchestrator.workflow_state import coerce_ac_marker_update
+from ouroboros.persistence.checkpoint import CheckpointStore
 
 if TYPE_CHECKING:
     from ouroboros.core.seed import Seed
@@ -341,6 +342,7 @@ class OrchestratorRunner:
         inherited_tools: list[str] | None = None,
         task_cwd: str | None = None,
         task_workspace: TaskWorkspace | None = None,
+        checkpoint_store: CheckpointStore | None = None,
     ) -> None:
         """Initialize orchestrator runner.
 
@@ -361,9 +363,12 @@ class OrchestratorRunner:
                         delegating parent session.
             task_cwd: Explicit working directory override for task execution metadata.
             task_workspace: Managed task workspace metadata for persistence and cleanup.
+            checkpoint_store: Optional checkpoint store for execution state persistence
+                        and recovery. When provided, enables per-level state snapshots.
         """
         self._adapter = adapter
         self._event_store = event_store
+        self._checkpoint_store = checkpoint_store
         self._console = console or Console()
         self._session_repo = SessionRepository(event_store)
         self._mcp_manager: MCPClientManager | None = mcp_manager
@@ -1774,6 +1779,7 @@ class OrchestratorRunner:
             enable_decomposition=self._enable_decomposition,
             inherited_runtime_handle=self._inherited_runtime_handle,
             task_cwd=self._effective_cwd(),
+            checkpoint_store=self._checkpoint_store,
         )
 
         # Check for cancellation before starting parallel execution

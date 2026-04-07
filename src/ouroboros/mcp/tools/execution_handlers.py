@@ -52,6 +52,7 @@ from ouroboros.orchestrator.adapter import (
 )
 from ouroboros.orchestrator.runner import OrchestratorRunner
 from ouroboros.orchestrator.session import SessionRepository, SessionStatus
+from ouroboros.persistence.checkpoint import CheckpointStore
 from ouroboros.persistence.event_store import EventStore
 from ouroboros.providers.base import LLMAdapter
 
@@ -394,6 +395,10 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     else runtime_backend or "unknown"
                 )
 
+                # Create checkpoint store for execution state persistence
+                checkpoint_store = CheckpointStore()
+                checkpoint_store.initialize()
+
                 # Create orchestrator runner
                 runner = OrchestratorRunner(
                     adapter=agent_adapter,
@@ -406,6 +411,7 @@ class ExecuteSeedHandler(BridgeAwareMixin):
                     inherited_runtime_handle=inherited_runtime_handle,
                     inherited_tools=inherited_effective_tools,
                     task_workspace=workspace,
+                    checkpoint_store=checkpoint_store,
                 )
 
                 skip_qa = arguments.get("skip_qa", False)
