@@ -372,6 +372,7 @@ def deserialize_level_contexts(data: list[dict[str, Any]]) -> list[LevelContext]
                         tools_used=tuple(ac.get("tools_used", ())),
                         files_modified=tuple(ac.get("files_modified", ())),
                         key_output=ac.get("key_output", ""),
+                        public_api=ac.get("public_api", ""),
                     )
                 )
             except Exception as e:
