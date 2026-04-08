@@ -180,7 +180,7 @@ class LevelContext:
                 lines.append(f"  Files modified: {files}")
             if summary.public_api:
                 lines.append(f"  Public API: {summary.public_api}")
-            elif summary.key_output:
+            if summary.key_output:
                 lines.append(f"  Result: {summary.key_output}")
 
         text = "\n".join(lines)

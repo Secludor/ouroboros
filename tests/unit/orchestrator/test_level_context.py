@@ -9,6 +9,8 @@ from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 from ouroboros.orchestrator.level_context import (
     ACContextSummary,
     LevelContext,
+    _build_public_api_summary,
+    _extract_public_api,
     build_context_prompt,
     deserialize_level_contexts,
     extract_level_context,
@@ -408,3 +410,223 @@ class TestLevelContextSerialization:
         for i, ctx in enumerate(restored):
             assert ctx.level_number == i
             assert ctx.completed_acs[0].ac_index == i
+
+    def test_round_trip_preserves_public_api(self) -> None:
+        """Test that public_api field survives serialization round-trip."""
+        original = [
+            LevelContext(
+                level_number=0,
+                completed_acs=(
+                    ACContextSummary(
+                        ac_index=0,
+                        ac_content="Create service",
+                        success=True,
+                        files_modified=("src/service.py",),
+                        key_output="Done",
+                        public_api="service.py: class UserService, def get_user(id: str) -> User",
+                    ),
+                ),
+            ),
+        ]
+        restored = deserialize_level_contexts(serialize_level_contexts(original))
+        ac = restored[0].completed_acs[0]
+        assert ac.public_api == "service.py: class UserService, def get_user(id: str) -> User"
+
+
+class TestExtractPublicApi:
+    """Tests for _extract_public_api signature extraction."""
+
+    def test_python_class_and_function(self, tmp_path: object) -> None:
+        """Test extracting Python class and function signatures."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "service.py"
+        p.write_text(
+            "class UserService:\n"
+            "    pass\n"
+            "\n"
+            "def get_user(id: str) -> User:\n"
+            "    pass\n"
+            "\n"
+            "async def create_user(name: str, email: str) -> User:\n"
+            "    pass\n"
+        )
+        sigs = _extract_public_api(str(p))
+        assert "class UserService" in sigs
+        assert "def get_user(id: str) -> User" in sigs
+        assert any("async def create_user" in s for s in sigs)
+
+    def test_python_skips_private(self, tmp_path: object) -> None:
+        """Test that private (underscore-prefixed) names are skipped."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "internal.py"
+        p.write_text(
+            "class _InternalHelper:\n"
+            "    pass\n"
+            "\n"
+            "def _private_fn():\n"
+            "    pass\n"
+            "\n"
+            "def public_fn() -> str:\n"
+            "    pass\n"
+        )
+        sigs = _extract_public_api(str(p))
+        assert len(sigs) == 1
+        assert "public_fn" in sigs[0]
+
+    def test_python_multiline_signature(self, tmp_path: object) -> None:
+        """Test extracting multi-line function signatures."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "multi.py"
+        p.write_text(
+            "def complex_function(\n"
+            "    arg1: str,\n"
+            "    arg2: int,\n"
+            "    arg3: list[str],\n"
+            ") -> dict[str, Any]:\n"
+            "    pass\n"
+        )
+        sigs = _extract_public_api(str(p))
+        assert len(sigs) == 1
+        assert "arg1: str" in sigs[0]
+        assert "arg2: int" in sigs[0]
+        assert "-> dict[str, Any]" in sigs[0]
+
+    def test_typescript_exports(self, tmp_path: object) -> None:
+        """Test extracting TypeScript exported signatures."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "service.ts"
+        p.write_text(
+            "export function getUser(id: string): User {\n"
+            "  return db.get(id);\n"
+            "}\n"
+            "\n"
+            "export class UserController {\n"
+            "  constructor() {}\n"
+            "}\n"
+            "\n"
+            "export interface UserDTO {\n"
+            "  name: string;\n"
+            "}\n"
+            "\n"
+            "function privateHelper() {}\n"
+        )
+        sigs = _extract_public_api(str(p))
+        assert any("getUser" in s for s in sigs)
+        assert any("UserController" in s for s in sigs)
+        assert any("UserDTO" in s for s in sigs)
+        assert not any("privateHelper" in s for s in sigs)
+
+    def test_go_exports(self, tmp_path: object) -> None:
+        """Test extracting Go exported (capitalized) signatures."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "service.go"
+        p.write_text(
+            "func GetUser(id string) (*User, error) {\n"
+            "    return nil, nil\n"
+            "}\n"
+            "\n"
+            "type UserService struct {\n"
+            "    db *DB\n"
+            "}\n"
+            "\n"
+            "func privateHelper() {}\n"
+        )
+        sigs = _extract_public_api(str(p))
+        assert any("GetUser" in s for s in sigs)
+        assert any("UserService" in s for s in sigs)
+        assert not any("privateHelper" in s for s in sigs)
+
+    def test_nonexistent_file(self) -> None:
+        """Test that nonexistent files return empty list."""
+        assert _extract_public_api("/nonexistent/file.py") == []
+
+    def test_unsupported_extension(self, tmp_path: object) -> None:
+        """Test that unsupported file types return empty list."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "data.json"
+        p.write_text('{"key": "value"}')
+        assert _extract_public_api(str(p)) == []
+
+
+class TestBuildPublicApiSummary:
+    """Tests for _build_public_api_summary."""
+
+    def test_summary_from_multiple_files(self, tmp_path: object) -> None:
+        """Test building summary across multiple files."""
+        import pathlib
+
+        p1 = pathlib.Path(str(tmp_path)) / "models.py"
+        p1.write_text("class User:\n    pass\n\nclass Post:\n    pass\n")
+        p2 = pathlib.Path(str(tmp_path)) / "service.py"
+        p2.write_text("def get_user(id: str) -> User:\n    pass\n")
+
+        summary = _build_public_api_summary((str(p1), str(p2)))
+        assert "models.py:" in summary
+        assert "service.py:" in summary
+        assert "class User" in summary
+        assert "get_user" in summary
+
+    def test_summary_truncates_long_output(self, tmp_path: object) -> None:
+        """Test that summary is truncated to _MAX_PUBLIC_API_CHARS."""
+        import pathlib
+
+        p = pathlib.Path(str(tmp_path)) / "big.py"
+        lines = [f"def function_{i}(arg: str) -> str:\n    pass\n" for i in range(100)]
+        p.write_text("\n".join(lines))
+
+        summary = _build_public_api_summary((str(p),))
+        assert len(summary) <= 500
+
+    def test_summary_skips_missing_files(self) -> None:
+        """Test that missing files are silently skipped."""
+        summary = _build_public_api_summary(("/nonexistent/a.py", "/nonexistent/b.py"))
+        assert summary == ""
+
+
+class TestPromptTextWithPublicApi:
+    """Tests for to_prompt_text() showing both public_api and key_output."""
+
+    def test_shows_both_public_api_and_key_output(self) -> None:
+        """Test that both public_api and key_output appear in prompt text."""
+        ctx = LevelContext(
+            level_number=0,
+            completed_acs=(
+                ACContextSummary(
+                    ac_index=0,
+                    ac_content="Create user service",
+                    success=True,
+                    files_modified=("src/service.py",),
+                    public_api="service.py: class UserService, def get_user(id: str) -> User",
+                    key_output="Service created successfully",
+                ),
+            ),
+        )
+        text = ctx.to_prompt_text()
+        assert "Public API:" in text
+        assert "class UserService" in text
+        assert "Result:" in text
+        assert "Service created successfully" in text
+
+    def test_shows_only_key_output_when_no_public_api(self) -> None:
+        """Test fallback to key_output when public_api is empty."""
+        ctx = LevelContext(
+            level_number=0,
+            completed_acs=(
+                ACContextSummary(
+                    ac_index=0,
+                    ac_content="Run migration",
+                    success=True,
+                    key_output="Migration applied",
+                ),
+            ),
+        )
+        text = ctx.to_prompt_text()
+        assert "Public API" not in text
+        assert "Result:" in text
+        assert "Migration applied" in text
