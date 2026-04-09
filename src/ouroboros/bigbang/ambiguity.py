@@ -27,6 +27,14 @@ log = structlog.get_logger()
 
 # Threshold for allowing Seed generation (NFR6)
 AMBIGUITY_THRESHOLD = 0.2
+SEED_CLOSER_ACTIVATION_THRESHOLD = 0.25
+AUTO_COMPLETE_STREAK_REQUIRED = 2
+
+# Minimum per-dimension clarity required before interview auto-completion.
+GOAL_CLARITY_FLOOR = 0.75
+CONSTRAINT_CLARITY_FLOOR = 0.65
+SUCCESS_CRITERIA_CLARITY_FLOOR = 0.70
+BROWNFIELD_CONTEXT_CLARITY_FLOOR = 0.60
 
 # Weights for greenfield score components (3 dimensions)
 GOAL_CLARITY_WEIGHT = 0.40
@@ -111,6 +119,46 @@ class AmbiguityScore:
             True if overall_score <= AMBIGUITY_THRESHOLD (0.2).
         """
         return self.overall_score <= AMBIGUITY_THRESHOLD
+
+
+def get_completion_floor_failures(
+    score: AmbiguityScore,
+    *,
+    is_brownfield: bool,
+) -> list[str]:
+    """Return any unmet component floors for interview auto-completion."""
+    required_components: list[tuple[str, str, float]] = [
+        ("goal_clarity", "Goal Clarity", GOAL_CLARITY_FLOOR),
+        ("constraint_clarity", "Constraint Clarity", CONSTRAINT_CLARITY_FLOOR),
+        ("success_criteria_clarity", "Success Criteria Clarity", SUCCESS_CRITERIA_CLARITY_FLOOR),
+    ]
+    if is_brownfield:
+        required_components.append(
+            ("context_clarity", "Context Clarity", BROWNFIELD_CONTEXT_CLARITY_FLOOR)
+        )
+
+    failures: list[str] = []
+    for attribute_name, label, minimum_clarity in required_components:
+        component = getattr(score.breakdown, attribute_name)
+        if component is None:
+            failures.append(f"{label} missing (< {minimum_clarity:.2f})")
+            continue
+        if component.clarity_score < minimum_clarity:
+            failures.append(f"{label} {component.clarity_score:.2f} < {minimum_clarity:.2f}")
+
+    return failures
+
+
+def qualifies_for_seed_completion(
+    score: AmbiguityScore,
+    *,
+    is_brownfield: bool,
+) -> bool:
+    """Return True when ambiguity and all required component floors are satisfied."""
+    return score.is_ready_for_seed and not get_completion_floor_failures(
+        score,
+        is_brownfield=is_brownfield,
+    )
 
 
 @dataclass

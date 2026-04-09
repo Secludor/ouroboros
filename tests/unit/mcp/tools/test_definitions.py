@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
+from ouroboros.bigbang.ambiguity import AmbiguityScore, ComponentScore, ScoreBreakdown
 from ouroboros.bigbang.interview import InterviewRound, InterviewState, InterviewStatus
 from ouroboros.core.types import Result
 from ouroboros.mcp.job_manager import JobLinks, JobSnapshot, JobStatus
@@ -68,36 +69,34 @@ def create_mock_live_ambiguity_score(
     score: float,
     *,
     seed_ready: bool,
-) -> MagicMock:
-    """Create a mock ambiguity score object for interview handler tests."""
-    return MagicMock(
+) -> AmbiguityScore:
+    """Create an ambiguity score object for interview handler tests."""
+    clarity_score = 1.0 - score
+    result = AmbiguityScore(
         overall_score=score,
-        is_ready_for_seed=seed_ready,
-        breakdown=MagicMock(
-            model_dump=MagicMock(
-                return_value={
-                    "goal_clarity": {
-                        "name": "Goal Clarity",
-                        "clarity_score": 1.0 - score,
-                        "weight": 0.4,
-                        "justification": "Mock goal clarity",
-                    },
-                    "constraint_clarity": {
-                        "name": "Constraint Clarity",
-                        "clarity_score": 1.0 - score,
-                        "weight": 0.3,
-                        "justification": "Mock constraint clarity",
-                    },
-                    "success_criteria_clarity": {
-                        "name": "Success Criteria Clarity",
-                        "clarity_score": 1.0 - score,
-                        "weight": 0.3,
-                        "justification": "Mock success clarity",
-                    },
-                }
-            )
+        breakdown=ScoreBreakdown(
+            goal_clarity=ComponentScore(
+                name="Goal Clarity",
+                clarity_score=clarity_score,
+                weight=0.4,
+                justification="Mock goal clarity",
+            ),
+            constraint_clarity=ComponentScore(
+                name="Constraint Clarity",
+                clarity_score=clarity_score,
+                weight=0.3,
+                justification="Mock constraint clarity",
+            ),
+            success_criteria_clarity=ComponentScore(
+                name="Success Criteria Clarity",
+                clarity_score=clarity_score,
+                weight=0.3,
+                justification="Mock success clarity",
+            ),
         ),
     )
+    assert result.is_ready_for_seed is seed_ready
+    return result
 
 
 class TestExecuteSeedHandler:
@@ -1673,12 +1672,126 @@ class TestInterviewHandlerCwd:
         mock_engine.ask_next_question.assert_not_called()
         assert result.value.meta["completed"] is True
 
-    async def test_interview_handle_auto_completes_when_live_ambiguity_is_low(self) -> None:
-        """Low live ambiguity should end the interview without another question."""
+    async def test_interview_handle_done_refuses_when_component_floors_fail(self) -> None:
+        """Low ambiguity alone should not allow completion when weak dimensions remain."""
+        handler = InterviewHandler()
+        handler._emit_event = AsyncMock()
+        state = InterviewState(
+            interview_id="sess-123",
+            ambiguity_score=0.18,
+            ambiguity_breakdown={
+                "goal_clarity": {
+                    "name": "Goal Clarity",
+                    "clarity_score": 0.86,
+                    "weight": 0.4,
+                    "justification": "Goal is clear.",
+                },
+                "constraint_clarity": {
+                    "name": "Constraint Clarity",
+                    "clarity_score": 0.40,
+                    "weight": 0.3,
+                    "justification": "Constraints remain vague.",
+                },
+                "success_criteria_clarity": {
+                    "name": "Success Criteria Clarity",
+                    "clarity_score": 0.82,
+                    "weight": 0.3,
+                    "justification": "Criteria are mostly measurable.",
+                },
+            },
+            rounds=[
+                InterviewRound(
+                    round_number=1,
+                    question="What should it do?",
+                    user_response=None,
+                )
+            ],
+        )
+
+        mock_engine = MagicMock()
+        mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_engine.complete_interview = AsyncMock()
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+        mock_engine.ask_next_question = AsyncMock()
+
+        with patch(
+            "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
+            return_value=mock_engine,
+        ):
+            result = await handler.handle({"session_id": "sess-123", "answer": "done"})
+
+        assert result.is_ok
+        assert state.status == InterviewStatus.IN_PROGRESS
+        assert result.value.meta["seed_ready"] is False
+        assert "completion floors are unmet" in result.value.content[0].text
+        mock_engine.complete_interview.assert_not_called()
+        mock_engine.ask_next_question.assert_not_called()
+
+    async def test_interview_handle_asks_closure_question_on_first_strong_score(self) -> None:
+        """A single strong score should not auto-complete the interview."""
         handler = InterviewHandler(llm_adapter=MagicMock())
         handler._emit_event = AsyncMock()
         state = InterviewState(
             interview_id="sess-123",
+            rounds=[
+                InterviewRound(round_number=1, question="Q1", user_response="A1"),
+                InterviewRound(round_number=2, question="Q2", user_response="A2"),
+                InterviewRound(round_number=3, question="Q3", user_response=None),
+            ],
+        )
+
+        async def record_answer(
+            current_state: InterviewState,
+            answer: str,
+            question: str,
+        ) -> Result[InterviewState, Exception]:
+            current_state.rounds.append(
+                InterviewRound(
+                    round_number=3,
+                    question=question,
+                    user_response=answer,
+                )
+            )
+            return Result.ok(current_state)
+
+        mock_engine = MagicMock()
+        mock_engine.load_state = AsyncMock(return_value=Result.ok(state))
+        mock_engine.record_response = AsyncMock(side_effect=record_answer)
+        mock_engine.complete_interview = AsyncMock()
+        mock_engine.save_state = AsyncMock(return_value=MagicMock(is_ok=True, is_err=False))
+        mock_engine.ask_next_question = AsyncMock(
+            return_value=MagicMock(is_ok=True, is_err=False, value="One last closure question?")
+        )
+        mock_score = create_mock_live_ambiguity_score(0.18, seed_ready=True)
+        mock_scorer = MagicMock()
+        mock_scorer.score = AsyncMock(return_value=Result.ok(mock_score))
+
+        with (
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
+                return_value=mock_engine,
+            ),
+            patch(
+                "ouroboros.mcp.tools.authoring_handlers.AmbiguityScorer",
+                return_value=mock_scorer,
+            ),
+        ):
+            result = await handler.handle({"session_id": "sess-123", "answer": "A3"})
+
+        assert result.is_ok
+        assert state.status == InterviewStatus.IN_PROGRESS
+        assert state.completion_candidate_streak == 1
+        assert "One last closure question?" in result.value.content[0].text
+        mock_engine.complete_interview.assert_not_called()
+        mock_engine.ask_next_question.assert_called_once()
+
+    async def test_interview_handle_auto_completes_on_second_strong_score(self) -> None:
+        """Two consecutive strong scores should allow auto-completion."""
+        handler = InterviewHandler(llm_adapter=MagicMock())
+        handler._emit_event = AsyncMock()
+        state = InterviewState(
+            interview_id="sess-123",
+            completion_candidate_streak=1,
             rounds=[
                 InterviewRound(round_number=1, question="Q1", user_response="A1"),
                 InterviewRound(round_number=2, question="Q2", user_response="A2"),
@@ -1733,10 +1846,7 @@ class TestInterviewHandlerCwd:
         assert result.value.meta["completed"] is True
         assert result.value.meta["ambiguity_score"] == 0.18
         assert "(ambiguity: 0.18) Ready for Seed generation." in result.value.content[0].text
-        # With parallel execution (asyncio.gather), ask_next_question runs
-        # concurrently alongside scoring.  Its result is discarded when
-        # completion triggers.  See https://github.com/Q00/ouroboros/issues/286
-        mock_engine.ask_next_question.assert_called_once()
+        mock_engine.ask_next_question.assert_not_called()
 
 
 class TestGenerateSeedHandlerAmbiguity:

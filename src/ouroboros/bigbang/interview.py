@@ -30,7 +30,9 @@ from ouroboros.providers.base import (
 log = structlog.get_logger()
 
 # Interview round constants
-MIN_ROUNDS_BEFORE_EARLY_EXIT = 3  # Must complete at least 3 rounds
+# Start scoring after 3 answered rounds. Closing pressure and auto-completion
+# are gated separately by ambiguity thresholds and sustained score quality.
+MIN_ROUNDS_BEFORE_EARLY_EXIT = 3
 DEFAULT_INTERVIEW_ROUNDS = 10  # Reference value for prompts (not enforced)
 
 # Legacy alias for backward compatibility
@@ -137,6 +139,7 @@ class InterviewState(BaseModel):
     explore_completed: bool = False
     ambiguity_score: float | None = Field(default=None, ge=0.0, le=1.0)
     ambiguity_breakdown: dict[str, Any] | None = None
+    completion_candidate_streak: int = Field(default=0, ge=0)
 
     @property
     def current_round_number(self) -> int:
@@ -603,20 +606,48 @@ class InterviewEngine:
         if state.ambiguity_score is None:
             return ""
 
-        from ouroboros.bigbang.ambiguity import AMBIGUITY_THRESHOLD
+        from pydantic import ValidationError as PydanticValidationError
+
+        from ouroboros.bigbang.ambiguity import (
+            AMBIGUITY_THRESHOLD,
+            AUTO_COMPLETE_STREAK_REQUIRED,
+            SEED_CLOSER_ACTIVATION_THRESHOLD,
+            AmbiguityScore,
+            ScoreBreakdown,
+            get_completion_floor_failures,
+        )
 
         lines = [
             "## Current Ambiguity Snapshot",
             f"- Overall ambiguity: {state.ambiguity_score:.2f}",
             f"- Seed-ready threshold: {AMBIGUITY_THRESHOLD:.2f}",
+            f"- Closure-mode threshold: {SEED_CLOSER_ACTIVATION_THRESHOLD:.2f}",
             (
                 "- Seed-ready now: yes"
                 if state.ambiguity_score <= AMBIGUITY_THRESHOLD
                 else "- Seed-ready now: no"
             ),
+            (
+                "- Closure mode active: yes"
+                if state.ambiguity_score <= SEED_CLOSER_ACTIVATION_THRESHOLD
+                else "- Closure mode active: no"
+            ),
+            (
+                "- Completion candidate streak: "
+                f"{state.completion_candidate_streak}/{AUTO_COMPLETE_STREAK_REQUIRED}"
+            ),
         ]
 
+        reconstructed_score: AmbiguityScore | None = None
         if isinstance(state.ambiguity_breakdown, dict):
+            try:
+                reconstructed_score = AmbiguityScore(
+                    overall_score=state.ambiguity_score,
+                    breakdown=ScoreBreakdown.model_validate(state.ambiguity_breakdown),
+                )
+            except PydanticValidationError:
+                reconstructed_score = None
+
             weakest_components: list[tuple[float, str, str]] = []
             for payload in state.ambiguity_breakdown.values():
                 if not isinstance(payload, dict):
@@ -638,13 +669,28 @@ class InterviewEngine:
                 if justification:
                     lines.append(f"  Reason: {justification}")
 
+        if reconstructed_score is not None:
+            floor_failures = get_completion_floor_failures(
+                reconstructed_score,
+                is_brownfield=state.is_brownfield,
+            )
+            if floor_failures:
+                lines.append(f"- Completion floors unmet: {'; '.join(floor_failures)}")
+            else:
+                lines.append("- Completion floors: passed")
+
         lines.append(
-            "- Use this snapshot to decide whether the next turn should close the interview or ask one more targeted question."
+            "- Use this snapshot to drill into the weakest area until closure mode is active."
+        )
+        lines.append(
+            "- A single seed-ready score is not enough to end the interview; require sustained clarity before asking a closure question."
         )
         return "\n".join(lines)
 
     def _select_perspectives(self, state: InterviewState) -> tuple[InterviewPerspective, ...]:
         """Choose the active perspective panel for the current round."""
+        from ouroboros.bigbang.ambiguity import SEED_CLOSER_ACTIVATION_THRESHOLD
+
         perspectives: list[InterviewPerspective] = [InterviewPerspective.BREADTH_KEEPER]
 
         if state.current_round_number <= 2:
@@ -665,11 +711,17 @@ class InterviewEngine:
         else:
             perspectives.extend(
                 [
+                    InterviewPerspective.RESEARCHER,
                     InterviewPerspective.SIMPLIFIER,
                     InterviewPerspective.ARCHITECT,
-                    InterviewPerspective.SEED_CLOSER,
                 ]
             )
+
+        if (
+            state.ambiguity_score is not None
+            and state.ambiguity_score <= SEED_CLOSER_ACTIVATION_THRESHOLD
+        ):
+            perspectives.append(InterviewPerspective.SEED_CLOSER)
 
         if state.is_brownfield and InterviewPerspective.ARCHITECT not in perspectives:
             perspectives.append(InterviewPerspective.ARCHITECT)
@@ -706,7 +758,8 @@ class InterviewEngine:
                 "- If one file, abstraction, or bug has dominated several rounds, zoom back out before going deeper.",
                 "- Preserve both implementation and written-output requirements when the user asked for both.",
                 "- Prefer breadth recap questions when multiple unresolved tracks still exist.",
-                "- When the interview is already seed-ready, ask a closure question instead of opening a new deep branch.",
+                "- Only ask a closure question when closure mode is active; otherwise keep drilling into the weakest area.",
+                "- Even when the score is seed-ready, do not end the interview on the first low-ambiguity turn.",
             ]
         )
 

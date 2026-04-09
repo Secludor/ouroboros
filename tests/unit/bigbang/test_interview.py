@@ -830,8 +830,44 @@ class TestInterviewEngineSystemPrompt:
         assert "### researcher" in prompt
         assert "### simplifier" in prompt
 
-    def test_system_prompt_uses_seed_closer_in_late_rounds(self) -> None:
-        """Late rounds should activate the closure perspective."""
+    def test_system_prompt_uses_seed_closer_when_closure_mode_is_active(self) -> None:
+        """Closure mode should activate the seed-closer perspective."""
+        mock_adapter = MagicMock()
+        engine = InterviewEngine(llm_adapter=mock_adapter)
+
+        state = InterviewState(
+            interview_id="test_001",
+            initial_context="Refine requirements",
+            ambiguity_score=0.24,
+            ambiguity_breakdown={
+                "goal_clarity": {
+                    "name": "Goal Clarity",
+                    "clarity_score": 0.82,
+                    "weight": 0.4,
+                    "justification": "Goal is mostly clear.",
+                },
+                "constraint_clarity": {
+                    "name": "Constraint Clarity",
+                    "clarity_score": 0.70,
+                    "weight": 0.3,
+                    "justification": "Constraints are getting clearer.",
+                },
+                "success_criteria_clarity": {
+                    "name": "Success Criteria Clarity",
+                    "clarity_score": 0.76,
+                    "weight": 0.3,
+                    "justification": "Criteria are becoming measurable.",
+                },
+            },
+        )
+
+        prompt = engine._build_system_prompt(state)
+
+        assert "### seed-closer" in prompt
+        assert "Closure mode active: yes" in prompt
+
+    def test_system_prompt_omits_seed_closer_when_closure_mode_is_inactive(self) -> None:
+        """High ambiguity should keep the closure perspective disabled."""
         mock_adapter = MagicMock()
         engine = InterviewEngine(llm_adapter=mock_adapter)
 
@@ -845,12 +881,13 @@ class TestInterviewEngineSystemPrompt:
                 InterviewRound(round_number=4, question="Q4", user_response="A4"),
                 InterviewRound(round_number=5, question="Q5", user_response="A5"),
             ],
+            ambiguity_score=0.41,
         )
 
         prompt = engine._build_system_prompt(state)
 
-        assert "### seed-closer" in prompt
-        assert "closure question" in prompt
+        assert "### seed-closer" not in prompt
+        assert "Closure mode active: no" in prompt
 
 
 class TestInterviewEngineConversationHistory:
