@@ -1833,7 +1833,9 @@ class TestInterviewHandlerCwd:
         mock_engine.ask_next_question = AsyncMock()
 
         with (
-            patch.object(handler, "_score_interview_state", AsyncMock(return_value=rescored)) as mock_score,
+            patch.object(
+                handler, "_score_interview_state", AsyncMock(return_value=rescored)
+            ) as mock_score,
             patch(
                 "ouroboros.mcp.tools.authoring_handlers.InterviewEngine",
                 return_value=mock_engine,
