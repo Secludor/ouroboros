@@ -484,6 +484,7 @@ class TestCreateOuroborosServer:
         assert server.info.name == "ouroboros-mcp"
         assert server.info.version == "1.0.0"
         tool_names = {tool.name for tool in server.info.tools}
+        assert "ouroboros_ac_tree_hud" in tool_names
         assert "ouroboros_channel_workflow" in tool_names
 
     def test_creates_server_with_custom_config(self) -> None:

@@ -731,7 +731,7 @@ def create_ouroboros_server(
         llm_backend: Optional LLM-only backend override.
 
     Returns:
-        Configured MCPServerAdapter with all 10 tools registered.
+        Configured MCPServerAdapter with all tools registered.
 
     Raises:
         ImportError: If MCP SDK is not installed.
