@@ -571,8 +571,10 @@ class OrchestratorRunner:
         from ouroboros.orchestrator.dependency_analyzer import DependencyAnalyzer
 
         llm_backend = getattr(self._adapter, "_llm_backend", None)
-        backend = llm_backend if isinstance(llm_backend, str) and llm_backend else (
-            self._adapter.runtime_backend
+        backend = (
+            llm_backend
+            if isinstance(llm_backend, str) and llm_backend
+            else (self._adapter.runtime_backend)
         )
         try:
             llm_adapter = create_llm_adapter(
