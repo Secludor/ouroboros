@@ -101,11 +101,7 @@ def test_load_skip_completed_markers_parses_yaml_metadata(tmp_path: Path) -> Non
     """The skip-completed marker file should resolve 1-based AC numbers."""
     marker_file = tmp_path / "completed.yaml"
     marker_file.write_text(
-        "completed_acs:\n"
-        "  - ac: 1\n"
-        "    reason: Done manually\n"
-        "    commit: abc1234\n"
-        "  - 2\n",
+        "completed_acs:\n  - ac: 1\n    reason: Done manually\n    commit: abc1234\n  - 2\n",
         encoding="utf-8",
     )
 
@@ -226,10 +222,7 @@ async def test_run_orchestrator_passes_skip_completed_markers_to_runner(tmp_path
     seed_file.write_text("goal: ignored\n", encoding="utf-8")
     marker_file = tmp_path / "completed.yaml"
     marker_file.write_text(
-        "completed_acs:\n"
-        "  - ac: 1\n"
-        "    reason: Hybrid flow\n"
-        "    commit: deadbee\n",
+        "completed_acs:\n  - ac: 1\n    reason: Hybrid flow\n    commit: deadbee\n",
         encoding="utf-8",
     )
 

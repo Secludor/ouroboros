@@ -1195,8 +1195,7 @@ class ClaudeAgentAdapter:
                     yield AgentMessage(
                         type="system",
                         content=(
-                            f"Transient backend backoff for {wait_time:.1f}s "
-                            f"before retrying: {e!s}"
+                            f"Transient backend backoff for {wait_time:.1f}s before retrying: {e!s}"
                         ),
                         data={
                             "subtype": self._transient_backoff_subtype(e),
