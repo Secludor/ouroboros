@@ -201,9 +201,10 @@ class ArtifactCollector:
     def _scan_directory(self, project_dir: str) -> list[str]:
         """Walk project_dir for source files when no paths were extractable.
 
-        Skips common dependency/cache directories and collects up to
-        MAX_FILES source files sorted by modification time (newest first)
-        so the evaluator sees the most recently changed code.
+        Skips binary/generated files and common dependency/cache directories.
+        Files are sorted by modification time (newest first) so the evaluator
+        sees the most recently changed code. The total character budget
+        (MAX_TOTAL_CHARS) limits how many are actually read upstream.
         """
         real_project = os.path.realpath(project_dir)
         paths: list[tuple[float, str]] = []
