@@ -1040,6 +1040,13 @@ class InterviewHandler:
                     # and completion-candidate streak.
                     answered = _count_answered_rounds(state)
                     if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
+                        # Scoring must complete before question generation:
+                        # _score_interview_state mutates state.ambiguity_score,
+                        # completion_candidate_streak, and ambiguity_breakdown.
+                        # ask_next_question reads those fields to build the
+                        # system prompt (closure mode, seed-ready, streak).
+                        # Running them in parallel would give the question
+                        # generator stale routing context.
                         live_score = await self._score_interview_state(llm_adapter, state)
                         if (
                             live_score is not None
