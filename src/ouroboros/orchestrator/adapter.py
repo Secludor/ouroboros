@@ -665,6 +665,11 @@ class AgentRuntime(Protocol):
         ...
 
     @property
+    def llm_backend(self) -> str | None:
+        """LLM backend identifier for non-runtime LLM tasks, or ``None``."""
+        ...
+
+    @property
     def working_directory(self) -> str | None:
         """Working directory for task execution, or ``None`` if unset."""
         ...
@@ -799,6 +804,10 @@ class ClaudeAgentAdapter:
     @property
     def runtime_backend(self) -> str:
         return self._runtime_handle_backend
+
+    @property
+    def llm_backend(self) -> str | None:
+        return self._runtime_handle_backend  # "claude" → resolved to "claude_code" by factory
 
     @property
     def working_directory(self) -> str | None:
