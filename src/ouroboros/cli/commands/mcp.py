@@ -7,14 +7,18 @@ from __future__ import annotations
 
 import asyncio
 from enum import Enum
+import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 from typing import Annotated
 
 from rich.console import Console
 import typer
 
-from ouroboros.cli.formatters.panels import print_error, print_info, print_success
+from ouroboros.cli.commands.mcp_doctor import register_doctor_command
+from ouroboros.cli.formatters.panels import print_info, print_success
 
 # PID file for detecting stale instances
 _PID_DIR = Path.home() / ".ouroboros"
@@ -29,6 +33,7 @@ class AgentRuntimeBackend(str, Enum):  # noqa: UP042
 
     CLAUDE = "claude"
     CODEX = "codex"
+    OPENCODE = "opencode"
 
 
 class LLMBackend(str, Enum):  # noqa: UP042
@@ -37,6 +42,7 @@ class LLMBackend(str, Enum):  # noqa: UP042
     CLAUDE_CODE = "claude_code"
     LITELLM = "litellm"
     CODEX = "codex"
+    OPENCODE = "opencode"
 
 
 def _write_pid_file() -> bool:
@@ -96,11 +102,67 @@ def _check_stale_instance() -> bool:
         return True
 
 
+def _ensure_shell_env(*, timeout: float = 10.0) -> None:
+    """Load login-shell environment when launched outside a login shell.
+
+    When a gateway process (e.g., OpenClaw) spawns ``ouroboros mcp serve``,
+    the child inherits only a minimal environment. This sources the user's
+    shell profile to recover PATH, ANTHROPIC_API_KEY, etc.
+
+    Uses JSON serialization to avoid multiline env value parsing issues.
+    Avoids the ``-i`` (interactive) flag which hangs on oh-my-zsh/p10k.
+    """
+    # Fast path: if key indicators are already present, skip
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return
+
+    shell = os.environ.get("SHELL", "/bin/zsh" if sys.platform == "darwin" else "/bin/bash")
+    shell_name = Path(shell).name
+
+    # Dump env as JSON — unambiguous, handles multiline values
+    dump_cmd = 'python3 -c "import os,json,sys; json.dump(dict(os.environ), sys.stdout)"'
+
+    if shell_name == "zsh":
+        cmd = [shell, "-l", "-c", f"[[ -f ~/.zshrc ]] && source ~/.zshrc 2>/dev/null; {dump_cmd}"]
+    elif shell_name == "bash":
+        cmd = [shell, "-l", "-c", f"[[ -f ~/.bashrc ]] && source ~/.bashrc 2>/dev/null; {dump_cmd}"]
+    else:
+        cmd = [shell, "-l", "-c", dump_cmd]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        _stderr_console.print(f"[yellow]Warning: shell env load failed: {e}[/yellow]")
+        return
+
+    if result.returncode != 0:
+        return
+
+    try:
+        env = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        _stderr_console.print("[yellow]Warning: could not parse shell env output[/yellow]")
+        return
+
+    current_path_dirs = set(os.environ.get("PATH", "").split(os.pathsep))
+    for key, val in env.items():
+        if key == "PATH":
+            new_dirs = [d for d in val.split(os.pathsep) if d and d not in current_path_dirs]
+            if new_dirs:
+                os.environ["PATH"] = (
+                    os.pathsep.join(new_dirs) + os.pathsep + os.environ.get("PATH", "")
+                )
+        elif key not in os.environ:
+            os.environ[key] = val
+
+
 app = typer.Typer(
     name="mcp",
     help="MCP (Model Context Protocol) server commands.",
     no_args_is_help=True,
 )
+
+register_doctor_command(app)
 
 
 async def _run_mcp_server(
@@ -121,6 +183,9 @@ async def _run_mcp_server(
         runtime_backend: Optional orchestrator runtime backend override.
         llm_backend: Optional LLM-only backend override.
     """
+    # Ensure login-shell environment is available (critical for gateway-spawned processes)
+    _ensure_shell_env()
+
     from ouroboros.mcp.server.adapter import create_ouroboros_server, validate_transport
     from ouroboros.orchestrator.session import SessionRepository
     from ouroboros.persistence.event_store import EventStore
@@ -129,7 +194,9 @@ async def _run_mcp_server(
     try:
         transport = validate_transport(transport)
     except ValueError:
-        print_error(f"Invalid transport {transport!r}. Must be 'stdio' or 'sse'.")
+        _stderr_console.print(
+            f"[red]Invalid transport {transport!r}. Must be 'stdio' or 'sse'.[/red]"
+        )
         raise typer.Exit(code=1)
 
     # Create EventStore with custom path if provided
@@ -138,22 +205,35 @@ async def _run_mcp_server(
     else:
         event_store = EventStore()
 
-    # Auto-cancel orphaned sessions on startup.
-    # Sessions left in RUNNING/PAUSED state for >1 hour are considered orphaned
-    # (e.g., from a previous crash). Cancel them before accepting new requests.
-    # NOTE: find_orphaned_sessions now checks for active runtime processes first,
-    # so sessions with live claude/codex agents won't be cancelled even if stale.
+    cleanup_task: asyncio.Task[None] | None = None
+
+    # Initialize the event store up front because the MCP server uses it for
+    # request handling. Orphan cleanup is intentionally deferred into the
+    # background so large SQLite histories do not block the initial MCP
+    # handshake on startup (#304).
     try:
         await event_store.initialize()
-        repo = SessionRepository(event_store)
-        cancelled = await repo.cancel_orphaned_sessions()
-        if cancelled:
-            _stderr_console.print(
-                f"[yellow]Auto-cancelled {len(cancelled)} orphaned session(s)[/yellow]"
-            )
     except Exception as e:
         # Auto-cleanup is best-effort — don't prevent server from starting
         _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
+    else:
+        repo = SessionRepository(event_store)
+
+        async def _run_startup_cleanup() -> None:
+            try:
+                cancelled = await repo.cancel_orphaned_sessions()
+                if cancelled:
+                    _stderr_console.print(
+                        f"[yellow]Auto-cancelled {len(cancelled)} orphaned session(s)[/yellow]"
+                    )
+            except Exception as e:
+                # Auto-cleanup is best-effort — don't prevent server startup
+                _stderr_console.print(f"[yellow]Warning: auto-cleanup failed: {e}[/yellow]")
+
+        cleanup_task = asyncio.create_task(
+            _run_startup_cleanup(),
+            name="ouroboros-mcp-startup-cleanup",
+        )
 
     # Auto-discover and connect MCP bridge for server-to-server communication
     from ouroboros.mcp.bridge import create_bridge_from_env
@@ -222,6 +302,12 @@ async def _run_mcp_server(
     try:
         await server.serve(transport=transport, host=host, port=port)
     finally:
+        if cleanup_task is not None and not cleanup_task.done():
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                pass
         _cleanup_pid_file()
 
 
@@ -262,7 +348,7 @@ def serve(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude or codex).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, or opencode).",
             case_sensitive=False,
         ),
     ] = None,
@@ -271,7 +357,7 @@ def serve(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, or codex)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, or opencode)."
             ),
             case_sensitive=False,
         ),
@@ -296,8 +382,8 @@ def serve(
         # Start with SSE transport on custom port
         ouroboros mcp serve --transport sse --port 9000
 
-        # Start with Codex runtime for orchestrator-driven tools
-        ouroboros mcp serve --runtime codex
+        # Start with OpenCode runtime
+        ouroboros mcp serve --runtime opencode
 
         # Use Codex CLI for LLM-only tools as well
         ouroboros mcp serve --runtime codex --llm-backend codex
@@ -326,19 +412,19 @@ def serve(
             )
         )
     except KeyboardInterrupt:
-        print_info("\nMCP Server stopped")
+        _stderr_console.print("[blue]MCP Server stopped[/blue]")
     except ImportError as e:
-        print_error(f"MCP dependencies not installed: {e}")
-        print_info("Install with: uv add mcp")
+        _stderr_console.print(f"[red]MCP dependencies not installed: {e}[/red]")
+        _stderr_console.print("[blue]Install with: uv add mcp[/blue]")
         raise typer.Exit(1) from e
     except OSError as e:
-        print_error(f"MCP Server failed to start: {e}")
-        print_info(
-            "If this keeps happening, try:\n"
+        _stderr_console.print(f"[red]MCP Server failed to start: {e}[/red]")
+        _stderr_console.print(
+            "[blue]If this keeps happening, try:\n"
             "  1. Check if another MCP server is running: cat ~/.ouroboros/mcp-server.pid\n"
             "  2. Kill stale process: kill $(cat ~/.ouroboros/mcp-server.pid)\n"
             "  3. Remove stale PID: rm ~/.ouroboros/mcp-server.pid\n"
-            "  4. Restart your MCP client"
+            "  4. Restart your MCP client[/blue]"
         )
         raise typer.Exit(1) from e
 
@@ -349,7 +435,7 @@ def info(
         AgentRuntimeBackend | None,
         typer.Option(
             "--runtime",
-            help="Agent runtime backend for orchestrator-driven tools (claude or codex).",
+            help="Agent runtime backend for orchestrator-driven tools (claude, codex, or opencode).",
             case_sensitive=False,
         ),
     ] = None,
@@ -358,7 +444,7 @@ def info(
         typer.Option(
             "--llm-backend",
             help=(
-                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, or codex)."
+                "LLM backend for interview/seed/evaluation tools (claude_code, litellm, codex, or opencode)."
             ),
             case_sensitive=False,
         ),

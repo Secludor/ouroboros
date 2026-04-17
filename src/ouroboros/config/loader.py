@@ -33,18 +33,14 @@ Functions:
     get_opencode_cli_path: Get OpenCode CLI path from env var or config
 """
 
+import ast
 import os
 from pathlib import Path
 import stat
 from typing import Any
 
-from dotenv import load_dotenv
 from pydantic import ValidationError as PydanticValidationError
 import yaml
-
-# Load .env file from current directory and ~/.ouroboros/
-load_dotenv()  # Current directory .env
-load_dotenv(Path.home() / ".ouroboros" / ".env")  # Global .env
 
 from ouroboros.config.models import (  # noqa: E402
     CredentialsConfig,
@@ -58,6 +54,8 @@ from ouroboros.core.errors import ConfigError  # noqa: E402
 _CODEX_LLM_BACKENDS = frozenset({"codex", "codex_cli", "opencode", "opencode_cli"})
 _OPENCODE_BACKENDS = frozenset({"opencode", "opencode_cli"})
 _CODEX_DEFAULT_MODEL = "default"
+_PLACEHOLDER_API_KEY_PREFIX = "YOUR_"
+_PLACEHOLDER_API_KEY_SUFFIX = "_API_KEY"
 _DEFAULT_CONSENSUS_MODELS = (
     "openrouter/openai/gpt-4o",
     "openrouter/anthropic/claude-opus-4-6",
@@ -66,6 +64,65 @@ _DEFAULT_CONSENSUS_MODELS = (
 _DEFAULT_CONSENSUS_ADVOCATE_MODEL = "openrouter/anthropic/claude-opus-4-6"
 _DEFAULT_CONSENSUS_DEVIL_MODEL = "openrouter/openai/gpt-4o"
 _DEFAULT_CONSENSUS_JUDGE_MODEL = "openrouter/google/gemini-2.5-pro"
+
+
+def _parse_env_value(raw_value: str) -> str:
+    candidate = raw_value.strip()
+    if not candidate:
+        return ""
+
+    if candidate[0] in {'"', "'"} and candidate[-1:] == candidate[0]:
+        try:
+            parsed = ast.literal_eval(candidate)
+        except (SyntaxError, ValueError):
+            return candidate[1:-1]
+        return str(parsed)
+
+    comment_index = candidate.find(" #")
+    if comment_index != -1:
+        candidate = candidate[:comment_index]
+    return candidate.rstrip()
+
+
+def _is_placeholder_api_key(value: str) -> bool:
+    """Treat common template placeholders as unset."""
+    candidate = value.strip()
+    return bool(
+        candidate
+        and candidate.startswith(_PLACEHOLDER_API_KEY_PREFIX)
+        and candidate.endswith(_PLACEHOLDER_API_KEY_SUFFIX)
+    )
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        if not key or any(ch.isspace() for ch in key):
+            continue
+
+        parsed_value = _parse_env_value(raw_value)
+        if not parsed_value or _is_placeholder_api_key(parsed_value):
+            continue
+
+        current_value = os.environ.get(key)
+        if current_value is None or _is_placeholder_api_key(current_value):
+            os.environ[key] = parsed_value
+
+
+for env_path in (Path(".env"), Path.home() / ".ouroboros" / ".env"):
+    _load_env_file(env_path)
 
 
 def ensure_config_dir() -> Path:
@@ -458,6 +515,32 @@ def get_opencode_cli_path() -> str | None:
         config = load_config()
         if config.orchestrator.opencode_cli_path:
             return config.orchestrator.opencode_cli_path
+    except ConfigError:
+        pass
+
+    return None
+
+
+def get_gemini_cli_path() -> str | None:
+    """Get Gemini CLI path from environment variable or config file.
+
+    Priority:
+        1. OUROBOROS_GEMINI_CLI_PATH environment variable
+        2. config.yaml orchestrator.gemini_cli_path
+        3. None (resolve from PATH at runtime)
+
+    Returns:
+        Path to Gemini CLI binary or None.
+    """
+    env_path = os.environ.get("OUROBOROS_GEMINI_CLI_PATH", "").strip()
+    if env_path:
+        return str(Path(env_path).expanduser())
+
+    try:
+        config = load_config()
+        gemini_path = getattr(config.orchestrator, "gemini_cli_path", None)
+        if gemini_path:
+            return gemini_path
     except ConfigError:
         pass
 

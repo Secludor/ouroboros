@@ -35,7 +35,7 @@ That's it. `ooo interview` runs a Socratic interview that auto-generates a seed 
 
 ### Alternative: Standalone CLI (`ouroboros`)
 
-Use this path if you prefer a standalone terminal workflow, or are using a non-Claude runtime (e.g., Codex CLI).
+Use this path if you prefer a standalone terminal workflow, or are using a non-Claude runtime (e.g., Codex CLI, OpenCode).
 
 **Requires Python >= 3.12.**
 
@@ -80,14 +80,16 @@ No Python, pip, or API key configuration needed -- Claude Code handles the runti
 pip install ouroboros-ai              # Base package (core engine)
 pip install ouroboros-ai[claude]      # + Claude Code runtime deps (anthropic, claude-agent-sdk)
 pip install ouroboros-ai[litellm]     # + LiteLLM multi-provider support (100+ models)
-pip install ouroboros-ai[dashboard]   # + Streamlit analytics dashboard (streamlit, plotly, pandas)
-pip install ouroboros-ai[all]         # Everything (claude + litellm + dashboard)
+pip install ouroboros-ai[mcp]         # + MCP server/client runtime support
+pip install ouroboros-ai[tui]         # + Textual terminal UI
+pip install ouroboros-ai[all]         # Everything (claude + litellm + mcp + tui + dashboard)
 
 ouroboros --version                   # verify CLI
 ```
 
 > **Which extra do I need?** If you only use Claude Code as your runtime, `ouroboros-ai[claude]` is sufficient.
 > For multi-model support via LiteLLM, use `ouroboros-ai[litellm]` or just grab everything with `ouroboros-ai[all]`.
+> Legacy note: `ouroboros-ai[dashboard]` is still accepted as a compatibility extra during the extras transition.
 
 **One-liner alternative** (auto-detects your runtime and installs matching extras):
 ```bash
@@ -113,6 +115,7 @@ uv run ouroboros --version            # verify CLI
 | Claude Code (`ooo`) | Claude Code with plugin support |
 | Standalone CLI (`ouroboros`) | Python >= 3.12, API key (Anthropic or OpenAI) |
 | Codex CLI backend | Python >= 3.12, `npm install -g @openai/codex`, OpenAI API key with access to GPT-5.4 |
+| OpenCode backend | Python >= 3.12, `opencode` on PATH, provider configured in OpenCode |
 
 ---
 
@@ -136,7 +139,7 @@ export OPENAI_API_KEY="your-openai-key"
 
 ```yaml
 orchestrator:
-  runtime_backend: claude   # claude | codex
+  runtime_backend: claude   # claude | codex | opencode
 
 llm:
   backend: claude_code      # claude_code | codex | litellm
@@ -195,7 +198,7 @@ Inside a Claude Code session:
 ooo interview "I want to build a personal finance tracker"
 ```
 
-> **CLI note:** The standalone CLI does not have an `interview` command. Use `ooo interview` inside Claude Code, or use MCP tools to run interviews.
+> **CLI note:** You can also run interviews from the terminal with `ouroboros init start --llm-backend <backend> "your idea"` (where `<backend>` is `claude_code`, `codex`, `opencode`, or `litellm`). For in-agent `ooo interview` usage: Claude Code works out-of-the-box; Codex CLI and OpenCode require `ouroboros setup --runtime <codex|opencode>` first to register the MCP server.
 
 The Socratic Interviewer asks clarifying questions:
 - "What platforms do you want to track?" (Bank accounts, credit cards, investments)
@@ -286,26 +289,27 @@ ooo interview "Add real-time notifications to the chat app"
 ooo run
 ```
 
-> **Terminal users:** The standalone CLI does not have an `interview` command. Generate seeds via `ooo interview` in Claude Code or via MCP tools, then run with `ouroboros run <seed_file>`.
+> **Terminal users:** Run interviews from the terminal with `ouroboros init start --llm-backend <backend> "your idea"`, then execute with `ouroboros run workflow <seed_file>`. (Separate from in-agent `ooo` usage; terminal flows don't require MCP registration.)
 
 ---
 
 ## Choosing a Runtime Backend
 
-Ouroboros delegates code execution to a pluggable runtime backend. Two ship out of the box:
+Ouroboros delegates code execution to a pluggable runtime backend. Three ship out of the box:
 
-| | Claude Code | Codex CLI |
-|---|---|---|
-| **Best for** | Claude Code users; subscription billing | OpenAI ecosystem; pay-per-token billing |
-| **Install** | `pip install ouroboros-ai[claude]` | `pip install ouroboros-ai` + `npm install -g @openai/codex` |
-| **Skill shortcuts** | `ooo` inside Claude Code | `ooo` after `ouroboros setup --runtime codex` installs managed Codex skills |
-| **Config value** | `claude` | `codex` |
+| | Claude Code | Codex CLI | OpenCode |
+|---|---|---|---|
+| **Best for** | Claude Code users; subscription billing | OpenAI ecosystem; pay-per-token billing | Multi-provider flexibility; open-source tooling |
+| **Install** | `pip install ouroboros-ai[claude]` | `pip install ouroboros-ai` + `npm install -g @openai/codex` | `pip install ouroboros-ai` + `opencode` on PATH |
+| **Skill shortcuts** | `ooo` inside Claude Code | `ooo` after `ouroboros setup --runtime codex` installs managed Codex skills | `ooo` after `ouroboros setup --runtime opencode` |
+| **Config value** | `claude` | `codex` | `opencode` |
 
-Both backends run the same core workflow engine (seed execution, TUI). However, user-facing commands still differ: Claude Code has native in-session `ooo` workflows, while Codex CLI relies on `ouroboros setup --runtime codex` to install managed rules/skills plus the MCP hookup. The `ouroboros` CLI remains the most universal terminal path, and some advanced operations are still MCP/Claude-only.
+All three backends run the same core workflow engine (seed execution, TUI). However, user-facing commands still differ: Claude Code has native in-session `ooo` workflows, while Codex CLI and OpenCode rely on `ouroboros setup --runtime <backend>` to configure the integration. The `ouroboros` CLI remains the most universal terminal path, and some advanced operations are still MCP/Claude-only.
 
 For backend-specific configuration:
 - [Claude Code runtime guide](runtime-guides/claude-code.md)
 - [Codex CLI runtime guide](runtime-guides/codex.md)
+- [OpenCode runtime guide](runtime-guides/opencode.md)
 
 ---
 
@@ -404,5 +408,6 @@ ouroboros cancel execution <session_id>
 - [Configuration Reference](config-reference.md) -- all config keys and defaults
 - [Claude Code runtime guide](runtime-guides/claude-code.md) -- backend-specific setup
 - [Codex CLI runtime guide](runtime-guides/codex.md) -- backend-specific setup
+- [OpenCode runtime guide](runtime-guides/opencode.md) -- backend-specific setup
 
 Need help? Open an issue on [GitHub](https://github.com/Q00/ouroboros/issues).

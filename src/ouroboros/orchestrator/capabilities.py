@@ -269,7 +269,9 @@ def _descriptor_from_tool(
 
 
 def build_capability_graph(
-    tool_catalog: SessionToolCatalog | Sequence[MCPToolDefinition] | Sequence[SessionToolCatalogEntry],
+    tool_catalog: SessionToolCatalog
+    | Sequence[MCPToolDefinition]
+    | Sequence[SessionToolCatalogEntry],
 ) -> CapabilityGraph:
     """Build a deterministic capability graph from the current tool surface."""
     descriptors: list[CapabilityDescriptor] = []

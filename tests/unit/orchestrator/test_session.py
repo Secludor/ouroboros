@@ -1086,6 +1086,39 @@ class TestFindOrphanedSessions:
         assert result == []
 
     @pytest.mark.asyncio
+    async def test_prefers_snapshot_query_over_full_replay(
+        self,
+        repository: SessionRepository,
+        mock_event_store: AsyncMock,
+    ) -> None:
+        """Snapshot query should avoid session-by-session replay on large stores."""
+        from ouroboros.persistence.event_store import SessionActivitySnapshot
+
+        old_time = datetime.now(UTC) - timedelta(hours=2)
+        mock_event_store.get_session_activity_snapshots = AsyncMock(
+            return_value=[
+                SessionActivitySnapshot(
+                    session_id="sess_1",
+                    execution_id="exec_sess_1",
+                    seed_id="seed_sess_1",
+                    start_time=old_time.isoformat(),
+                    last_activity=old_time,
+                    status_event_type=None,
+                    runtime_status=None,
+                )
+            ]
+        )
+
+        start_event = self._make_start_event("sess_1", timestamp=old_time)
+        mock_event_store.replay.return_value = [start_event]
+
+        result = await repository.find_orphaned_sessions()
+
+        assert len(result) == 1
+        mock_event_store.get_session_activity_snapshots.assert_awaited_once()
+        mock_event_store.get_all_sessions.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_failed_session_not_orphaned(
         self,
         repository: SessionRepository,

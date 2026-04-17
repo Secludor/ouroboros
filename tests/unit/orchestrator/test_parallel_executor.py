@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,10 +19,14 @@ from ouroboros.orchestrator.coordinator import CoordinatorReview, FileConflict
 from ouroboros.orchestrator.dependency_analyzer import ACNode, DependencyGraph
 from ouroboros.orchestrator.level_context import ACContextSummary, LevelContext
 from ouroboros.orchestrator.parallel_executor import (
+    MAX_STALL_RETRIES,
+    STALL_TIMEOUT_SECONDS,
     ACExecutionOutcome,
     ACExecutionResult,
     ParallelACExecutor,
+    ParallelExecutionResult,
     StageExecutionOutcome,
+    render_parallel_verification_report,
 )
 
 
@@ -201,7 +206,9 @@ class TestParallelACExecutor:
         assert [
             tool["name"] for tool in started_event.data["runtime"]["metadata"]["tool_catalog"]
         ] == ["Read", "Edit"]
-        assert [tool["name"] for tool in started_event.data["runtime"]["metadata"]["capability_graph"]] == [
+        assert [
+            tool["name"] for tool in started_event.data["runtime"]["metadata"]["capability_graph"]
+        ] == [
             "Read",
             "Edit",
         ]
@@ -565,6 +572,460 @@ class TestParallelACExecutor:
 
         assert result is None
         assert runtime.cancelled is True
+
+    @pytest.mark.asyncio
+    async def test_decomposed_ac_inlines_sub_ac_dispatch_into_single_ac(self) -> None:
+        """Decomposed execution should recurse through _execute_single_ac without a helper path."""
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=True,
+        )
+        executor._emit_subtask_event = AsyncMock()
+        executor._try_decompose_ac = AsyncMock(
+            side_effect=[["Extract parser", "Wire parser"], None, None]
+        )
+
+        async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
+            return ACExecutionResult(
+                ac_index=int(kwargs["ac_index"]),
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                final_message=f"{kwargs['ac_content']} complete",
+                depth=int(kwargs["depth"]),
+            )
+
+        executor._execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+
+        with patch.object(
+            executor,
+            "_execute_single_ac",
+            wraps=executor._execute_single_ac,
+        ) as execute_single_ac_spy:
+            result = await executor._execute_single_ac(
+                ac_index=1,
+                ac_content="Implement parser workflow",
+                session_id="sess_decompose",
+                tools=["Read", "Edit"],
+                tool_catalog=None,
+                system_prompt="system",
+                seed_goal="Ship parser workflow",
+                depth=0,
+                execution_id="exec_decompose",
+            )
+
+        assert hasattr(executor, "_execute_sub_acs") is False
+        assert result.success is True
+        assert result.is_decomposed is True
+        assert [sub_result.ac_content for sub_result in result.sub_results] == [
+            "Extract parser",
+            "Wire parser",
+        ]
+        assert [sub_result.depth for sub_result in result.sub_results] == [1, 1]
+        assert [
+            (
+                int(call.kwargs["ac_index"]),
+                str(call.kwargs["ac_content"]),
+                int(call.kwargs["depth"]),
+            )
+            for call in execute_single_ac_spy.await_args_list
+        ] == [
+            (1, "Implement parser workflow", 0),
+            (100, "Extract parser", 1),
+            (101, "Wire parser", 1),
+        ]
+        assert executor._try_decompose_ac.await_count == 3
+        assert executor._execute_atomic_ac.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_top_level_decomposition_preserves_sub_ac_runtime_identity(self) -> None:
+        """First-level decomposed children should still execute with sub-AC runtime metadata."""
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=True,
+        )
+        executor._emit_subtask_event = AsyncMock()
+        executor._try_decompose_ac = AsyncMock(
+            side_effect=[["Extract parser", "Wire parser"], None, None]
+        )
+
+        async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
+            return ACExecutionResult(
+                ac_index=int(kwargs["ac_index"]),
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                final_message=f"{kwargs['ac_content']} complete",
+                depth=int(kwargs["depth"]),
+            )
+
+        executor._execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+
+        await executor._execute_single_ac(
+            ac_index=1,
+            ac_content="Implement parser workflow",
+            session_id="sess_sub_ac_runtime",
+            tools=["Read", "Edit"],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="Ship parser workflow",
+            depth=0,
+            execution_id="exec_sub_ac_runtime",
+        )
+
+        assert [
+            (
+                int(call.kwargs["ac_index"]),
+                bool(call.kwargs["is_sub_ac"]),
+                int(call.kwargs["parent_ac_index"]),
+                int(call.kwargs["sub_ac_index"]),
+            )
+            for call in executor._execute_atomic_ac.await_args_list
+        ] == [
+            (100, True, 1, 0),
+            (101, True, 1, 1),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_depth_three_forces_atomic_without_further_decomposition(self) -> None:
+        """Depth 2 may still recurse, but depth 3 must execute atomically."""
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=AsyncMock(),
+            console=MagicMock(),
+            enable_decomposition=True,
+            max_decomposition_depth=3,
+        )
+        executor._emit_subtask_event = AsyncMock()
+        executor._try_decompose_ac = AsyncMock(
+            side_effect=[
+                ["Depth 3 child A", "Depth 3 child B"],
+            ]
+        )
+
+        async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
+            return ACExecutionResult(
+                ac_index=int(kwargs["ac_index"]),
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                final_message=f"{kwargs['ac_content']} complete",
+                depth=int(kwargs["depth"]),
+            )
+
+        executor._execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+
+        result = await executor._execute_single_ac(
+            ac_index=0,
+            ac_content="Root AC",
+            session_id="sess_depth_limit",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="Ship recursive decomposition",
+            depth=2,
+            execution_id="exec_depth_limit",
+        )
+
+        assert result.is_decomposed is True
+        assert result.decomposition_depth_warning is False
+        assert [sub_result.ac_content for sub_result in result.sub_results] == [
+            "Depth 3 child A",
+            "Depth 3 child B",
+        ]
+        assert [sub_result.depth for sub_result in result.sub_results] == [3, 3]
+        assert [sub_result.decomposition_depth_warning for sub_result in result.sub_results] == [
+            True,
+            True,
+        ]
+        executor._try_decompose_ac.assert_awaited_once()
+        assert executor._execute_atomic_ac.await_count == 2
+        assert [call.kwargs["depth"] for call in executor._execute_atomic_ac.await_args_list] == [
+            3,
+            3,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_execute_parallel_skips_externally_satisfied_acs(self) -> None:
+        """Top-level ACs flagged by --skip-completed should not be re-executed."""
+        seed = _make_seed("AC 1", "AC 2")
+        dependency_graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content="AC 1", depends_on=()),
+                ACNode(index=1, content="AC 2", depends_on=()),
+            ),
+            execution_levels=((0, 1),),
+        )
+        executor = _make_executor()
+        executor._execute_ac_batch = AsyncMock(
+            return_value=[
+                ACExecutionResult(
+                    ac_index=1,
+                    ac_content="AC 2",
+                    success=True,
+                    final_message="Implemented AC 2",
+                )
+            ]
+        )
+
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=dependency_graph.to_execution_plan(),
+            session_id="orch_skip_completed",
+            execution_id="exec_skip_completed",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            externally_satisfied_acs={
+                0: {"reason": "Implemented manually", "commit": "abc1234"},
+            },
+        )
+
+        assert result.success_count == 1
+        assert result.externally_satisfied_count == 1
+        assert result.failure_count == 0
+        assert result.results[0].outcome == ACExecutionOutcome.SATISFIED_EXTERNALLY
+        assert "Implemented manually" in result.results[0].final_message
+        assert "abc1234" in result.results[0].final_message
+        executor._execute_ac_batch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_externally_satisfied_ac_blocked_when_dependency_failed(self) -> None:
+        """Externally satisfied ACs must be BLOCKED when an upstream dep failed.
+
+        Regression guard for #401: a stale --skip-completed marker must never
+        bypass dependency validation. If AC0 fails and AC1 (which depends on
+        AC0) is flagged externally_satisfied, AC1 must be BLOCKED — not
+        SATISFIED_EXTERNALLY — because the supposed satisfied state is stale
+        relative to the current failed run.
+        """
+        seed = _make_seed("AC 0 foundation", "AC 1 dependent flow")
+        dependency_graph = DependencyGraph(
+            nodes=(
+                ACNode(index=0, content=seed.acceptance_criteria[0], depends_on=()),
+                ACNode(index=1, content=seed.acceptance_criteria[1], depends_on=(0,)),
+            ),
+            execution_levels=((0,), (1,)),
+        )
+        executor = _make_executor()
+        executed_batches: list[list[int]] = []
+
+        async def fake_execute_ac_batch(**kwargs: Any) -> list[ACExecutionResult]:
+            batch_indices = list(kwargs["batch_indices"])
+            executed_batches.append(batch_indices)
+            return [
+                ACExecutionResult(
+                    ac_index=ac_index,
+                    ac_content=seed.acceptance_criteria[ac_index],
+                    success=False,
+                    error="Foundation failed",
+                    outcome=ACExecutionOutcome.FAILED,
+                )
+                for ac_index in batch_indices
+            ]
+
+        executor._execute_ac_batch = fake_execute_ac_batch  # type: ignore[method-assign]
+
+        result = await executor.execute_parallel(
+            seed=seed,
+            execution_plan=dependency_graph.to_execution_plan(),
+            session_id="orch_stale_external_satisfied",
+            execution_id="exec_stale_external_satisfied",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            externally_satisfied_acs={
+                1: {"reason": "Previously satisfied", "commit": "deadbeef"},
+            },
+        )
+
+        # Only AC0 should be executed (and fails). AC1 must NOT run even
+        # though it was flagged externally satisfied — its upstream dep failed.
+        assert executed_batches == [[0]]
+
+        ac1_result = next(r for r in result.results if r.ac_index == 1)
+        assert ac1_result.outcome == ACExecutionOutcome.BLOCKED
+        assert ac1_result.success is False
+        assert ac1_result.error == "Skipped: dependency failed"
+
+        assert result.externally_satisfied_count == 0
+        assert result.blocked_count == 1
+        assert result.failure_count == 1
+
+    def test_verification_report_emits_depth_warning_feedback_metadata(self) -> None:
+        """Verification report should expose depth warnings as structured metadata."""
+        parallel_result = ParallelExecutionResult(
+            results=(
+                ACExecutionResult(
+                    ac_index=0,
+                    ac_content="Root AC",
+                    success=True,
+                    is_decomposed=True,
+                    sub_results=(
+                        ACExecutionResult(
+                            ac_index=100,
+                            ac_content="Depth-limited leaf",
+                            success=True,
+                            final_message="Leaf complete",
+                            depth=3,
+                            decomposition_depth_warning=True,
+                        ),
+                    ),
+                ),
+            ),
+            success_count=1,
+            failure_count=0,
+        )
+
+        report = render_parallel_verification_report(
+            parallel_result,
+            1,
+            max_decomposition_depth=3,
+        )
+
+        assert "## Feedback Metadata" in report
+        assert '"code": "decomposition_depth_warning"' in report
+        assert '"affected_ac_paths": ["1.1"]' in report
+        assert '"max_depth": 3' in report
+
+    @pytest.mark.asyncio
+    async def test_stall_retry_is_scoped_to_atomic_leaf_execution(self) -> None:
+        """Leaf retries should not re-run composite decomposition or sibling dispatch."""
+        event_store = AsyncMock()
+        event_store.append = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=True,
+        )
+        executor._emit_subtask_event = AsyncMock()
+        executor._try_decompose_ac = AsyncMock(
+            side_effect=[["Retry leaf", "Stable leaf"], None, None]
+        )
+
+        async def fake_execute_atomic_ac(**kwargs: Any) -> ACExecutionResult:
+            ac_index = int(kwargs["ac_index"])
+            retry_attempt = int(kwargs["retry_attempt"])
+            if ac_index == 100 and retry_attempt == 0:
+                return ACExecutionResult(
+                    ac_index=ac_index,
+                    ac_content=str(kwargs["ac_content"]),
+                    success=False,
+                    error="__STALL_DETECTED__",
+                    retry_attempt=retry_attempt,
+                    depth=int(kwargs["depth"]),
+                )
+
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                final_message="retry leaf complete",
+                retry_attempt=retry_attempt,
+                depth=int(kwargs["depth"]),
+            )
+
+        executor._execute_atomic_ac = AsyncMock(side_effect=fake_execute_atomic_ac)
+
+        result = await executor._execute_single_ac(
+            ac_index=1,
+            ac_content="Composite AC",
+            session_id="sess_atomic_retry_scope",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="Retry only stalled leaves",
+            depth=0,
+            execution_id="exec_atomic_retry_scope",
+        )
+
+        assert result.success is True
+        assert result.is_decomposed is True
+        assert [sub_result.retry_attempt for sub_result in result.sub_results] == [1, 0]
+        assert executor._try_decompose_ac.await_count == 3
+        assert [
+            (
+                int(call.kwargs["ac_index"]),
+                int(call.kwargs["depth"]),
+                int(call.kwargs["retry_attempt"]),
+            )
+            for call in executor._execute_atomic_ac.await_args_list
+        ] == [
+            (100, 1, 0),
+            (100, 1, 1),
+            (101, 1, 0),
+        ]
+
+        stall_events = [
+            call.args[0]
+            for call in event_store.append.await_args_list
+            if call.args and call.args[0].type == "execution.ac.stall_detected"
+        ]
+        assert len(stall_events) == 1
+        assert stall_events[0].aggregate_id == "exec_atomic_retry_scope_sub_ac_1_0"
+        assert stall_events[0].data["attempt"] == 1
+        assert stall_events[0].data["max_attempts"] == MAX_STALL_RETRIES + 1
+        assert stall_events[0].data["action"] == "restart"
+
+    @pytest.mark.asyncio
+    async def test_stall_retry_exhaustion_returns_terminal_failure_from_single_ac(self) -> None:
+        """Single-AC execution should convert an unrecoverable stall into a normal failure."""
+        event_store = AsyncMock()
+        event_store.append = AsyncMock()
+        executor = ParallelACExecutor(
+            adapter=MagicMock(),
+            event_store=event_store,
+            console=MagicMock(),
+            enable_decomposition=False,
+        )
+
+        async def always_stall(**kwargs: Any) -> ACExecutionResult:
+            return ACExecutionResult(
+                ac_index=int(kwargs["ac_index"]),
+                ac_content=str(kwargs["ac_content"]),
+                success=False,
+                error="__STALL_DETECTED__",
+                retry_attempt=int(kwargs["retry_attempt"]),
+                depth=int(kwargs["depth"]),
+            )
+
+        executor._execute_atomic_ac = AsyncMock(side_effect=always_stall)
+
+        result = await executor._execute_single_ac(
+            ac_index=2,
+            ac_content="Leaf AC",
+            session_id="sess_atomic_retry_exhausted",
+            tools=["Read"],
+            tool_catalog=None,
+            system_prompt="system",
+            seed_goal="Normalize terminal stall failures",
+            depth=0,
+            execution_id="exec_atomic_retry_exhausted",
+        )
+
+        assert result.success is False
+        assert result.error == f"Stalled (no activity for {STALL_TIMEOUT_SECONDS:.0f}s)"
+        assert result.retry_attempt == MAX_STALL_RETRIES
+        assert executor._execute_atomic_ac.await_count == MAX_STALL_RETRIES + 1
+        assert [
+            int(call.kwargs["retry_attempt"])
+            for call in executor._execute_atomic_ac.await_args_list
+        ] == list(range(MAX_STALL_RETRIES + 1))
+
+        stall_events = [
+            call.args[0]
+            for call in event_store.append.await_args_list
+            if call.args and call.args[0].type == "execution.ac.stall_detected"
+        ]
+        assert [event.data["attempt"] for event in stall_events] == [1, 2, 3]
+        assert [event.data["action"] for event in stall_events] == [
+            "restart",
+            "restart",
+            "abandon",
+        ]
+        assert all(event.data["max_attempts"] == MAX_STALL_RETRIES + 1 for event in stall_events)
 
     @pytest.mark.asyncio
     async def test_runtime_handle_cache_isolated_between_acceptance_criteria(self) -> None:
@@ -1248,8 +1709,8 @@ class TestParallelACExecutor:
         event_store.replay.assert_awaited_once_with("execution", "orch_123_ac_1")
         # Compare handles ignoring updated_at (timestamp set at creation time
         # may differ by microseconds from the one stored in the result).
-        result_handle = replace(result.runtime_handle, updated_at=None)
-        expected_handle = replace(resume_handle, updated_at=None)
+        result_handle = replace(result.runtime_handle, updated_at=None)  # type: ignore[type-var]
+        expected_handle = replace(resume_handle, updated_at=None)  # type: ignore[type-var]
         assert result_handle == expected_handle
 
     @pytest.mark.asyncio
@@ -1989,7 +2450,7 @@ class TestParallelACExecutor:
         )
         executor = _make_executor()
 
-        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+        async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
             ac_index = kwargs["ac_index"]
             ac_content = kwargs["ac_content"]
             if ac_index == 0:
@@ -2066,7 +2527,7 @@ class TestParallelACExecutor:
         executor = _make_executor()
         executed_indices: list[int] = []
 
-        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+        async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
             ac_index = int(kwargs["ac_index"])
             executed_indices.append(ac_index)
             return ACExecutionResult(
@@ -2126,7 +2587,7 @@ class TestParallelACExecutor:
         stage_two_started = asyncio.Event()
         stage_two_started_after: frozenset[int] | None = None
 
-        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+        async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
             nonlocal stage_two_started_after
             ac_index = int(kwargs["ac_index"])
             ac_content = str(kwargs["ac_content"])
@@ -2209,7 +2670,7 @@ class TestParallelACExecutor:
         second_batch_started = asyncio.Event()
         stage_two_started = asyncio.Event()
 
-        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+        async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
             ac_index = int(kwargs["ac_index"])
             ac_content = str(kwargs["ac_content"])
 
@@ -2288,7 +2749,7 @@ class TestParallelACExecutor:
             get_dependencies=lambda ac_index: {2: (0,), 3: (1,)}.get(ac_index, ()),
         )
 
-        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+        async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
             ac_index = int(kwargs["ac_index"])
             ac_content = str(kwargs["ac_content"])
             if ac_index == 0:
@@ -2391,7 +2852,7 @@ class TestParallelACExecutor:
             )
         )
 
-        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+        async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
             ac_index = int(kwargs["ac_index"])
             return ACExecutionResult(
                 ac_index=ac_index,
@@ -2481,7 +2942,7 @@ class TestParallelACExecutor:
             )
         )
 
-        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+        async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
             ac_index = int(kwargs["ac_index"])
             ac_content = str(kwargs["ac_content"])
             if ac_index == 0:
@@ -2555,7 +3016,7 @@ class TestParallelACExecutor:
         )
         captured_contexts: list[LevelContext] = []
 
-        async def fake_execute_single_ac(**kwargs: object) -> ACExecutionResult:
+        async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
             captured_contexts.extend(kwargs["level_contexts"])
             return ACExecutionResult(
                 ac_index=int(kwargs["ac_index"]),
@@ -2598,7 +3059,7 @@ class TestParallelACExecutor:
             def permission_mode(self) -> str | None:
                 return "acceptEdits"
 
-            async def execute_task(self, **kwargs: object):
+            async def execute_task(self, **kwargs: Any):
                 resume_handle = kwargs["resume_handle"]
                 assert isinstance(resume_handle, RuntimeHandle)
                 assert resume_handle.metadata["retry_attempt"] == 2
@@ -2694,7 +3155,7 @@ class TestParallelACExecutor:
             def permission_mode(self) -> str | None:
                 return self._permission_mode
 
-            async def execute_task(self, **kwargs: object):
+            async def execute_task(self, **kwargs: Any):
                 resume_handle = kwargs["resume_handle"]
                 assert isinstance(resume_handle, RuntimeHandle)
                 runtime_handle = RuntimeHandle(
@@ -2798,7 +3259,7 @@ class TestParallelACExecutor:
             def permission_mode(self) -> str | None:
                 return self._permission_mode
 
-            async def execute_task(self, **kwargs: object):
+            async def execute_task(self, **kwargs: Any):
                 resume_handle = kwargs["resume_handle"]
                 assert isinstance(resume_handle, RuntimeHandle)
                 yield AgentMessage(

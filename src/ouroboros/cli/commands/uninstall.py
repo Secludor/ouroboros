@@ -28,6 +28,7 @@ from ouroboros.cli.formatters.panels import (
     print_success,
     print_warning,
 )
+from ouroboros.cli.opencode_config import find_opencode_config
 
 app = typer.Typer(
     name="uninstall",
@@ -167,6 +168,69 @@ def _remove_codex_artifacts(dry_run: bool) -> bool:
     return had_work and all_ok
 
 
+def _strip_jsonc(text: str) -> str:
+    """Strip JSONC features (comments, trailing commas) to produce valid JSON.
+
+    .. deprecated::
+        Forwards to :func:`ouroboros.cli.jsonc.strip_jsonc` which handles
+        quoted strings correctly.
+    """
+    from ouroboros.cli.jsonc import strip_jsonc
+
+    return strip_jsonc(text)
+
+
+def _find_opencode_config() -> Path | None:
+    """Locate existing OpenCode config (``opencode.jsonc`` or ``opencode.json``).
+
+    Delegates to :func:`ouroboros.cli.opencode_config.find_opencode_config`
+    with ``allow_default=False`` so that uninstall skips cleanly when no
+    config file exists.
+    """
+    return find_opencode_config(allow_default=False)
+
+
+def _remove_opencode_mcp(dry_run: bool) -> bool:
+    """Remove ouroboros entry from OpenCode config (opencode.jsonc or opencode.json)."""
+    config_path = _find_opencode_config()
+    if config_path is None:
+        return False
+
+    try:
+        data = json.loads(_strip_jsonc(config_path.read_text()))
+    except (json.JSONDecodeError, OSError):
+        print_warning(f"{config_path} is malformed — skipping.")
+        return False
+    mcp = data.get("mcp")
+    if not isinstance(mcp, dict) or "ouroboros" not in mcp:
+        return False
+
+    if dry_run:
+        print_info(f"[dry-run] Would remove ouroboros from {config_path}")
+        return True
+
+    del mcp["ouroboros"]
+
+    # Warn if we're about to overwrite a .jsonc file that contained comments.
+    if config_path.suffix == ".jsonc":
+        try:
+            original_text = config_path.read_text(encoding="utf-8")
+        except OSError:
+            original_text = ""
+        if "//" in original_text or "/*" in original_text:
+            print_warning(
+                f"Note: JSONC comments in {config_path} were removed during config update."
+            )
+
+    try:
+        config_path.write_text(json.dumps(data, indent=2) + "\n")
+    except OSError:
+        print_warning(f"Could not write {config_path} — skipping.")
+        return False
+    print_success(f"Removed ouroboros from {config_path}")
+    return True
+
+
 def _remove_claude_md_block(project_dir: Path, dry_run: bool) -> bool:
     """Remove <!-- ooo:START --> … <!-- ooo:END --> block from CLAUDE.md."""
     claude_md = project_dir / "CLAUDE.md"
@@ -298,6 +362,15 @@ def uninstall(
     except OSError:
         targets.append("Codex MCP config (~/.codex/config.toml — may be unreadable)")
 
+    opencode_config = _find_opencode_config()
+    try:
+        if opencode_config is not None:
+            oc_data = json.loads(_strip_jsonc(opencode_config.read_text()))
+            if isinstance(oc_data.get("mcp"), dict) and "ouroboros" in oc_data["mcp"]:
+                targets.append(f"OpenCode MCP config ({opencode_config})")
+    except (json.JSONDecodeError, OSError):
+        targets.append(f"OpenCode MCP config ({opencode_config} — may be malformed)")
+
     codex_rules = Path.home() / ".codex" / "rules" / "ouroboros.md"
     codex_skills = Path.home() / ".codex" / "skills" / "ouroboros"
     if codex_rules.exists() or codex_skills.exists():
@@ -359,6 +432,10 @@ def uninstall(
     if not _remove_codex_mcp(dry_run=False):
         if any("codex/config.toml" in t for t in targets):
             failed.append("~/.codex/config.toml")
+
+    if not _remove_opencode_mcp(dry_run=False):
+        if any("OpenCode MCP" in t for t in targets):
+            failed.append("OpenCode MCP config")
 
     if not _remove_codex_artifacts(dry_run=False):
         if any("Codex rules" in t for t in targets):

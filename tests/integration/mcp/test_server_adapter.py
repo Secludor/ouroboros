@@ -5,6 +5,7 @@ registration, resource handling, and the full server lifecycle.
 """
 
 import asyncio
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -482,6 +483,9 @@ class TestCreateOuroborosServer:
 
         assert server.info.name == "ouroboros-mcp"
         assert server.info.version == "1.0.0"
+        tool_names = {tool.name for tool in server.info.tools}
+        assert "ouroboros_ac_tree_hud" in tool_names
+        assert "ouroboros_channel_workflow" in tool_names
 
     def test_creates_server_with_custom_config(self) -> None:
         """Factory creates server with custom configuration."""
@@ -541,10 +545,53 @@ class TestCreateOuroborosServer:
         assert mock_create_llm_adapter.call_args.kwargs["backend"] == "codex"
         assert mock_create_llm_adapter.call_args.kwargs["max_turns"] == 1
 
-    def test_opencode_backend_is_rejected_at_server_creation(self) -> None:
-        """OpenCode is not yet available — server creation should raise early."""
-        with pytest.raises(ValueError, match="not yet available"):
+    def test_opencode_backend_is_accepted_at_server_creation(self) -> None:
+        """OpenCode backend is forwarded through the shared adapter factory."""
+        with (
+            patch("ouroboros.providers.create_llm_adapter") as mock_create_llm_adapter,
+            patch("ouroboros.orchestrator.create_agent_runtime") as mock_create_runtime,
+        ):
+            mock_create_llm_adapter.return_value = MagicMock()
+            mock_create_runtime.return_value = MagicMock()
+
             create_ouroboros_server(runtime_backend="opencode", llm_backend="opencode")
+
+        mock_create_llm_adapter.assert_called_once()
+        assert mock_create_llm_adapter.call_args.kwargs["backend"] == "opencode"
+        mock_create_runtime.assert_called_once()
+        assert mock_create_runtime.call_args.kwargs["backend"] == "opencode"
+
+    @pytest.mark.asyncio
+    async def test_channel_workflow_set_repo_and_status(self, tmp_path: Path) -> None:
+        """Channel workflow tool supports repo config and status without LLM execution."""
+        server = create_ouroboros_server(state_dir=tmp_path / "data")
+
+        set_result = await server.call_tool(
+            "ouroboros_channel_workflow",
+            {
+                "action": "set_repo",
+                "guild_id": "g1",
+                "channel_id": "c1",
+                "repo": str(tmp_path / "repo"),
+            },
+        )
+
+        assert set_result.is_ok
+        assert "Default repo" in set_result.value.text_content
+
+        status_result = await server.call_tool(
+            "ouroboros_channel_workflow",
+            {
+                "action": "status",
+                "guild_id": "g1",
+                "channel_id": "c1",
+            },
+        )
+
+        assert status_result.is_ok
+        assert "Channel Workflow Summary" in status_result.value.text_content
+        assert str(tmp_path / "repo") in status_result.value.text_content
+        assert (Path.home() / ".ouroboros" / "ouroboros.db").exists()
 
 
 class TestMCPServerAdapterConcurrency:

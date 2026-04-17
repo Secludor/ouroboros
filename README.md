@@ -38,11 +38,12 @@
 
 ---
 
-> **New: PM Mode** — `ooo pm` generates a PRD through a guided PM-focused interview.
-> Ouroboros now supports product management workflows: stakeholder alignment, user story mapping, and structured PRD generation — all driven by the same Socratic engine.
+> **New: OpenClaw Integration** — Ouroboros now runs inside chat platforms via [OpenClaw](./docs/guides/openclaw-channel-workflow.md).
+> Install the skill, connect MCP, and your team can run `ooo` commands directly from Slack, Discord, or any OpenClaw-supported channel.
 >
-> ```
-> > ooo pm "I want to build a notification system"
+> ```bash
+> clawhub install ouroboros
+> openclaw mcp set ouroboros '{"command":"uvx","args":["--from","ouroboros-ai[mcp]","ouroboros","mcp","serve"]}'
 > ```
 
 ---
@@ -79,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/Q00/ouroboros/main/scripts/install.
 > ooo interview "I want to build a task management CLI"
 ```
 
-> Works with Claude Code and Codex CLI. The installer detects your runtime, registers the MCP server, and installs skills automatically.
+> Works with Claude Code, Codex CLI, and OpenCode. The installer detects Claude Code and Codex CLI automatically and registers the MCP server. For OpenCode, run `ouroboros setup --runtime opencode` after installation.
 
 <details>
 <summary><strong>Other install methods</strong></summary>
@@ -95,11 +96,24 @@ Then run `ooo setup` inside a Claude Code session.
 pip install ouroboros-ai                # base
 pip install ouroboros-ai[claude]        # + Claude Code deps
 pip install ouroboros-ai[litellm]       # + LiteLLM multi-provider
-pip install ouroboros-ai[all]           # everything
+pip install ouroboros-ai[mcp]           # + MCP server/client support
+pip install ouroboros-ai[tui]           # + Textual terminal UI
+pip install ouroboros-ai[all]           # everything (claude + litellm + mcp + tui + dashboard)
 ouroboros setup                         # configure runtime
 ```
 
-See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md)
+Legacy compatibility: `ouroboros-ai[dashboard]` is still accepted as a compatibility alias while extras migrate.
+
+See runtime guides: [Claude Code](./docs/runtime-guides/claude-code.md) · [Codex CLI](./docs/runtime-guides/codex.md) · [OpenCode](./docs/runtime-guides/opencode.md)
+
+Chat platform integration (OpenClaw / Slack / Discord):
+```bash
+clawhub install ouroboros                    # install OpenClaw skill
+openclaw mcp set ouroboros '{"command":"uvx","args":["--from","ouroboros-ai[mcp]","ouroboros","mcp","serve"]}'
+```
+> If `openclaw mcp set` is not recognized, run `openclaw update` to get the latest version.
+
+Guide: [Channel workflow integration](./docs/guides/openclaw-channel-workflow.md)
 
 </details>
 
@@ -221,8 +235,9 @@ Inside AI coding agent sessions, use `ooo <cmd>` skills. From the terminal, use 
 | `ooo qa` | *(via skill)* | General-purpose QA verdict for any artifact |
 | `ooo update` | `ouroboros update` | Check for updates + upgrade to latest |
 | `ooo brownfield` | *(via skill)* | Scan and manage brownfield repo defaults |
+| `ooo publish` | *(skill/runtime surface; uses `gh` CLI)* | Publish a Seed as GitHub Epic/Task issues for team workflows |
 
-> Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`) are available through agent skills or MCP tools only.
+> Not all skills have direct CLI equivalents. Some (`evaluate`, `evolve`, `unstuck`, `ralph`, `publish`) are available through agent skills, runtime rules, or MCP tools rather than a direct `ouroboros <subcommand>` shell command.
 
 See the [CLI reference](./docs/cli-reference.md) for full details.
 

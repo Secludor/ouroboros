@@ -602,11 +602,21 @@ class QAHandler:
                 )
             )
 
-        except Exception as e:
-            log.error("mcp.tool.qa.error", error=str(e))
+        except (ValueError, RuntimeError) as e:
+            # Configuration/bootstrap errors (unsupported backend, missing
+            # provider install) — actionable by the user, safe to surface.
+            log.warning("mcp.tool.qa.config_error", error=str(e))
             return Result.err(
                 MCPToolError(
-                    f"QA evaluation failed: {e}",
+                    f"QA setup failed: {e}",
+                    tool_name="ouroboros_qa",
+                )
+            )
+        except Exception:
+            log.exception("mcp.tool.qa.error")
+            return Result.err(
+                MCPToolError(
+                    "QA evaluation failed due to an internal error. Check server logs for details.",
                     tool_name="ouroboros_qa",
                 )
             )

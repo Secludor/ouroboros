@@ -10,6 +10,7 @@ MCP server startup in _run_mcp_server(), ensuring:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -77,6 +78,11 @@ class TestMCPStartupAutoCleanup:
         """Test that startup with no orphaned sessions skips cancellation."""
         mock_es, mock_repo, mock_server = self._create_patches(cancelled_sessions=[])
 
+        async def serve_side_effect(*args, **kwargs) -> None:
+            await asyncio.sleep(0)
+
+        mock_server.serve.side_effect = serve_side_effect
+
         with (
             patch(
                 "ouroboros.persistence.event_store.EventStore",
@@ -96,7 +102,52 @@ class TestMCPStartupAutoCleanup:
             await _run_mcp_server("localhost", 8080, "stdio")
 
         mock_repo.cancel_orphaned_sessions.assert_called_once()
+        mock_es.initialize.assert_awaited_once()
         mock_server.serve.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_startup_does_not_wait_for_background_cleanup(self) -> None:
+        """Server startup should not wait for orphan cleanup to finish."""
+        cleanup_started = asyncio.Event()
+        allow_cleanup_finish = asyncio.Event()
+        serve_started = asyncio.Event()
+
+        mock_es = AsyncMock()
+        mock_es.initialize = AsyncMock()
+        mock_repo = AsyncMock()
+
+        async def slow_cleanup() -> list:
+            cleanup_started.set()
+            await allow_cleanup_finish.wait()
+            return []
+
+        mock_repo.cancel_orphaned_sessions = AsyncMock(side_effect=slow_cleanup)
+
+        mock_server = MagicMock()
+        mock_server.info.tools = []
+
+        async def serve_side_effect(*args, **kwargs) -> None:
+            serve_started.set()
+            allow_cleanup_finish.set()
+            await asyncio.sleep(0)
+
+        mock_server.serve = AsyncMock(side_effect=serve_side_effect)
+
+        with (
+            patch("ouroboros.persistence.event_store.EventStore", return_value=mock_es),
+            patch("ouroboros.orchestrator.session.SessionRepository", return_value=mock_repo),
+            patch(
+                "ouroboros.mcp.server.adapter.create_ouroboros_server",
+                return_value=mock_server,
+            ),
+        ):
+            from ouroboros.cli.commands.mcp import _run_mcp_server
+
+            await _run_mcp_server("localhost", 8080, "stdio")
+
+        assert cleanup_started.is_set()
+        assert serve_started.is_set()
+        mock_server.serve.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_orphans_detected_and_cancelled(self) -> None:
@@ -131,6 +182,12 @@ class TestMCPStartupAutoCleanup:
             ),
             patch("ouroboros.cli.commands.mcp._stderr_console") as mock_console,
         ):
+
+            async def serve_side_effect(*args, **kwargs) -> None:
+                await asyncio.sleep(0)
+
+            mock_server.serve.side_effect = serve_side_effect
+
             from ouroboros.cli.commands.mcp import _run_mcp_server
 
             await _run_mcp_server("localhost", 8080, "stdio")
@@ -138,6 +195,50 @@ class TestMCPStartupAutoCleanup:
         mock_repo.cancel_orphaned_sessions.assert_called_once()
         mock_console.print.assert_any_call("[yellow]Auto-cancelled 2 orphaned session(s)[/yellow]")
         mock_server.serve.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_pending_background_cleanup_is_cancelled_on_shutdown(self) -> None:
+        """Server shutdown should cancel an unfinished startup cleanup task."""
+        cleanup_started = asyncio.Event()
+        cleanup_cancelled = asyncio.Event()
+
+        mock_es = AsyncMock()
+        mock_es.initialize = AsyncMock()
+        mock_repo = AsyncMock()
+
+        async def slow_cleanup() -> list:
+            cleanup_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleanup_cancelled.set()
+                raise
+
+        mock_repo.cancel_orphaned_sessions = AsyncMock(side_effect=slow_cleanup)
+
+        mock_server = MagicMock()
+        mock_server.info.tools = []
+
+        async def serve_side_effect(*args, **kwargs) -> None:
+            await cleanup_started.wait()
+
+        mock_server.serve = AsyncMock(side_effect=serve_side_effect)
+
+        with (
+            patch("ouroboros.persistence.event_store.EventStore", return_value=mock_es),
+            patch("ouroboros.orchestrator.session.SessionRepository", return_value=mock_repo),
+            patch(
+                "ouroboros.mcp.server.adapter.create_ouroboros_server",
+                return_value=mock_server,
+            ),
+        ):
+            from ouroboros.cli.commands.mcp import _run_mcp_server
+
+            await _run_mcp_server("localhost", 8080, "stdio")
+
+        assert cleanup_started.is_set()
+        assert cleanup_cancelled.is_set()
+        mock_server.serve.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_cleanup_failure_does_not_prevent_startup(self) -> None:
@@ -156,6 +257,12 @@ class TestMCPStartupAutoCleanup:
             ),
             patch("ouroboros.cli.commands.mcp._stderr_console") as mock_console,
         ):
+
+            async def serve_side_effect(*args, **kwargs) -> None:
+                await asyncio.sleep(0)
+
+            mock_server.serve.side_effect = serve_side_effect
+
             from ouroboros.cli.commands.mcp import _run_mcp_server
 
             await _run_mcp_server("localhost", 8080, "stdio")
@@ -186,6 +293,12 @@ class TestMCPStartupAutoCleanup:
             ),
             patch("ouroboros.cli.commands.mcp._stderr_console") as mock_console,
         ):
+
+            async def serve_side_effect(*args, **kwargs) -> None:
+                await asyncio.sleep(0)
+
+            mock_server.serve.side_effect = serve_side_effect
+
             from ouroboros.cli.commands.mcp import _run_mcp_server
 
             await _run_mcp_server("localhost", 8080, "stdio")
@@ -216,7 +329,11 @@ class TestMCPStartupAutoCleanup:
 
         mock_server = MagicMock()
         mock_server.info.tools = []
-        mock_server.serve = AsyncMock()
+
+        async def serve_side_effect(*args, **kwargs) -> None:
+            await asyncio.sleep(0)
+
+        mock_server.serve = AsyncMock(side_effect=serve_side_effect)
 
         with (
             patch(
@@ -236,7 +353,7 @@ class TestMCPStartupAutoCleanup:
 
             await _run_mcp_server("localhost", 8080, "stdio")
 
-        assert call_order == ["initialize", "cancel_orphaned"]
+        assert call_order[:2] == ["initialize", "cancel_orphaned"]
 
     @pytest.mark.asyncio
     async def test_runtime_backend_is_forwarded_to_server_factory(self) -> None:
@@ -331,6 +448,11 @@ class TestMCPStartupAutoCleanup:
         ]
 
         mock_es, mock_repo, mock_server = self._create_patches(cancelled_sessions=single_orphan)
+
+        async def serve_side_effect(*args, **kwargs) -> None:
+            await asyncio.sleep(0)
+
+        mock_server.serve.side_effect = serve_side_effect
 
         with (
             patch(

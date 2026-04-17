@@ -28,7 +28,9 @@ def test_implementation_policy_allows_default_runtime_tools() -> None:
 
 
 def test_coordinator_policy_derives_conservative_envelope() -> None:
-    graph = build_capability_graph(assemble_session_tool_catalog(["Read", "Write", "Edit", "Bash", "Glob", "Grep"]))
+    graph = build_capability_graph(
+        assemble_session_tool_catalog(["Read", "Write", "Edit", "Bash", "Glob", "Grep"])
+    )
 
     allowed = allowed_capability_names(
         graph,

@@ -553,6 +553,64 @@ class TestEventStoreErrorHandling:
             await store.replay("test", "test-123")
 
 
+class TestSessionActivitySnapshots:
+    """Test aggregated session snapshot queries for orphan detection."""
+
+    async def test_returns_latest_status_and_activity(self, event_store: EventStore) -> None:
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess-running",
+                data={
+                    "execution_id": "exec-running",
+                    "seed_id": "seed-running",
+                    "start_time": "2026-04-01T00:00:00+00:00",
+                },
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.progress.updated",
+                aggregate_type="session",
+                aggregate_id="sess-running",
+                data={"progress": {"step": 2}},
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.session.started",
+                aggregate_type="session",
+                aggregate_id="sess-completed",
+                data={
+                    "execution_id": "exec-completed",
+                    "seed_id": "seed-completed",
+                    "start_time": "2026-04-01T01:00:00+00:00",
+                },
+            )
+        )
+        await event_store.append(
+            BaseEvent(
+                type="orchestrator.progress.updated",
+                aggregate_type="session",
+                aggregate_id="sess-completed",
+                data={"progress": {"runtime_status": "completed"}},
+            )
+        )
+
+        snapshots = await event_store.get_session_activity_snapshots()
+        by_id = {snapshot.session_id: snapshot for snapshot in snapshots}
+
+        assert set(by_id) == {"sess-running", "sess-completed"}
+        assert by_id["sess-running"].execution_id == "exec-running"
+        assert by_id["sess-running"].seed_id == "seed-running"
+        assert by_id["sess-running"].status_event_type is None
+        assert by_id["sess-running"].runtime_status is None
+        assert by_id["sess-running"].last_activity is not None
+        assert by_id["sess-completed"].status_event_type == "orchestrator.progress.updated"
+        assert by_id["sess-completed"].runtime_status == "completed"
+
+
 class TestGetAllSessions:
     """Test get_all_sessions returns all session lifecycle events."""
 

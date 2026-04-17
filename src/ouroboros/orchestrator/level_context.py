@@ -8,13 +8,17 @@ through file system exploration.
 Usage:
     from ouroboros.orchestrator.level_context import extract_level_context
 
-    context = extract_level_context(results, level_num=0)
+    context = extract_level_context(
+        results, level_num=0, workspace_root="/path/to/session/workspace"
+    )
     prompt_text = context.to_prompt_text()
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import os
+import re
 from typing import TYPE_CHECKING, Any
 
 from ouroboros.observability.logging import get_logger
@@ -29,6 +33,143 @@ log = get_logger(__name__)
 _MAX_KEY_OUTPUT_CHARS = 200
 # Maximum characters for the entire level context section
 _MAX_LEVEL_CONTEXT_CHARS = 2000
+# Maximum characters for public API summary per AC
+_MAX_PUBLIC_API_CHARS = 500
+# Maximum file size (bytes) to read for API extraction (1 MB)
+_MAX_FILE_SIZE_BYTES = 1_048_576
+# Maximum number of files to process for public API summary
+_MAX_FILES_FOR_API = 20
+
+
+def _extract_public_api(file_path: str, workspace_root: str) -> list[str]:
+    """Extract public API signatures from a source file.
+
+    Reads the file and extracts top-level public definitions:
+    - Python: class/def signatures (non-underscore prefixed)
+    - TypeScript/JS: exported functions/classes/interfaces/types
+    - Go: exported (capitalized) func/type signatures
+
+    Args:
+        file_path: Path to the source file to scan.
+        workspace_root: Required workspace directory. Files whose resolved
+            path falls outside this root are rejected (defence in depth against
+            callers that forget to pre-filter). May be passed raw or already
+            resolved — this function applies realpath() internally.
+
+    Returns list of signature strings like:
+        ["class UserService", "def get_user(id: str) -> User"]
+    """
+    if not workspace_root:
+        # Required sentinel — empty root means reject everything.
+        return []
+    try:
+        resolved_root = os.path.realpath(workspace_root)
+        # Resolve symlinks to prevent symlink-based path traversal
+        resolved = os.path.realpath(file_path)
+        # Defence-in-depth: reject paths outside the workspace root even if
+        # callers skipped their own containment check.
+        if resolved != resolved_root and not resolved.startswith(resolved_root + os.sep):
+            return []
+        # Check file size before reading to avoid memory exhaustion
+        if os.path.getsize(resolved) > _MAX_FILE_SIZE_BYTES:
+            return []
+        with open(resolved) as f:
+            content = f.read()
+    except (OSError, UnicodeDecodeError):
+        return []
+
+    signatures: list[str] = []
+
+    if file_path.endswith(".py"):
+        # Extract top-level (non-indented) class and function signatures.
+        # Handles multi-line signatures by accumulating lines until parens balance.
+        lines = content.split("\n")
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            m = re.match(r"^(class|def|async\s+def)\s+(\w+)", line)
+            if m:
+                name = m.group(2)
+                if not name.startswith("_"):
+                    # Accumulate multi-line signature until parens balance
+                    sig_lines = [line.rstrip()]
+                    open_parens = line.count("(") - line.count(")")
+                    while open_parens > 0 and i + 1 < len(lines):
+                        i += 1
+                        sig_lines.append(lines[i].strip())
+                        open_parens += lines[i].count("(") - lines[i].count(")")
+                    sig = " ".join(sig_lines)
+                    # Trim trailing colon and everything after
+                    sig = re.sub(r":\s*$", "", sig)
+                    # Collapse whitespace
+                    sig = re.sub(r"\s{2,}", " ", sig).strip()
+                    signatures.append(sig)
+            i += 1
+
+    elif file_path.endswith((".ts", ".tsx", ".js", ".jsx")):
+        for m in re.finditer(
+            r"^export\s+(?:default\s+)?((?:function|class|interface|type|const|enum)\s+\w[^\n{;]*)",
+            content,
+            re.MULTILINE,
+        ):
+            signatures.append(m.group(1).strip())
+
+    elif file_path.endswith(".go"):
+        for m in re.finditer(
+            r"^((?:func|type)\s+[A-Z]\w*[^\n{]*)",
+            content,
+            re.MULTILINE,
+        ):
+            signatures.append(m.group(1).strip())
+
+    return signatures
+
+
+def _build_public_api_summary(
+    files_modified: tuple[str, ...],
+    *,
+    workspace_root: str,
+) -> str:
+    """Build a public API summary across all modified files.
+
+    Args:
+        files_modified: Tuple of file paths to scan.
+        workspace_root: Required workspace directory. Only files whose
+            realpath falls within this directory are processed. Passing an
+            empty string or a path outside any expected tree will cause all
+            files to be rejected — there is no bypass path.
+
+    Returns a compact string like:
+        user_service.py: class UserService, def get_user(id: str) -> User;
+        models.py: class User
+    """
+    if not workspace_root:
+        # Explicitly reject empty paths: a missing workspace would be a
+        # containment bypass if silently treated as "/" or CWD.
+        return ""
+    resolved_root = os.path.realpath(workspace_root)
+
+    parts: list[str] = []
+    processed = 0
+    for file_path in files_modified:
+        if processed >= _MAX_FILES_FOR_API:
+            break
+        if not os.path.isfile(file_path):
+            continue
+        # Path containment check: skip files outside workspace
+        resolved_file = os.path.realpath(file_path)
+        if not resolved_file.startswith(resolved_root + os.sep) and resolved_file != resolved_root:
+            continue
+        sigs = _extract_public_api(file_path, resolved_root)
+        processed += 1
+        if sigs:
+            basename = os.path.basename(file_path)
+            parts.append(f"{basename}: {', '.join(sigs)}")
+
+    summary = "; ".join(parts)
+    if len(summary) > _MAX_PUBLIC_API_CHARS:
+        summary = summary[: _MAX_PUBLIC_API_CHARS - 3] + "..."
+    return summary
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +183,7 @@ class ACContextSummary:
         tools_used: Unique tool names used during execution.
         files_modified: File paths modified via Write/Edit tools.
         key_output: Truncated final message (last N chars).
+        public_api: Extracted public API signatures from modified files.
     """
 
     ac_index: int
@@ -50,6 +192,7 @@ class ACContextSummary:
     tools_used: tuple[str, ...] = field(default_factory=tuple)
     files_modified: tuple[str, ...] = field(default_factory=tuple)
     key_output: str = ""
+    public_api: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +229,8 @@ class LevelContext:
                 if len(summary.files_modified) > 5:
                     files += f" (+{len(summary.files_modified) - 5} more)"
                 lines.append(f"  Files modified: {files}")
+            if summary.public_api:
+                lines.append(f"  Public API: {summary.public_api}")
             if summary.key_output:
                 lines.append(f"  Result: {summary.key_output}")
 
@@ -155,6 +300,8 @@ def build_context_prompt(level_contexts: list[LevelContext]) -> str:
 def extract_level_context(
     ac_results: list[tuple[int, str, bool, tuple[AgentMessage, ...], str]],
     level_num: int,
+    *,
+    workspace_root: str,
 ) -> LevelContext:
     """Extract context from completed AC results in a level.
 
@@ -162,6 +309,10 @@ def extract_level_context(
         ac_results: List of (ac_index, ac_content, success, messages, final_message)
             tuples from the completed level.
         level_num: Level number for tracking.
+        workspace_root: Required workspace directory that bounds all file
+            reads performed while building public-API summaries. Callers that
+            do not have a session workspace MUST pass an explicit sentinel
+            (e.g., ``os.getcwd()`` or a temp dir) — there is no silent bypass.
 
     Returns:
         LevelContext with summaries of completed work.
@@ -186,14 +337,22 @@ def extract_level_context(
         if final_message:
             key_output = final_message[-_MAX_KEY_OUTPUT_CHARS:].strip()
 
+        sorted_files = tuple(sorted(files_modified))
+        public_api = (
+            _build_public_api_summary(sorted_files, workspace_root=workspace_root)
+            if success
+            else ""
+        )
+
         summaries.append(
             ACContextSummary(
                 ac_index=ac_index,
                 ac_content=ac_content,
                 success=success,
                 tools_used=tuple(sorted(tools_used)),
-                files_modified=tuple(sorted(files_modified)),
+                files_modified=sorted_files,
                 key_output=key_output,
+                public_api=public_api,
             )
         )
 
@@ -274,6 +433,7 @@ def deserialize_level_contexts(data: list[dict[str, Any]]) -> list[LevelContext]
                         tools_used=tuple(ac.get("tools_used", ())),
                         files_modified=tuple(ac.get("files_modified", ())),
                         key_output=ac.get("key_output", ""),
+                        public_api=ac.get("public_api", ""),
                     )
                 )
             except Exception as e:

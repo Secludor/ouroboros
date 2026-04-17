@@ -4,6 +4,7 @@ This module implements the interview protocol that refines vague ideas into
 clear requirements through iterative questioning. Users control when to stop.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -29,7 +30,9 @@ from ouroboros.providers.base import (
 log = structlog.get_logger()
 
 # Interview round constants
-MIN_ROUNDS_BEFORE_EARLY_EXIT = 3  # Must complete at least 3 rounds
+# Start scoring after 3 answered rounds. Closing pressure and auto-completion
+# are gated separately by ambiguity thresholds and sustained score quality.
+MIN_ROUNDS_BEFORE_EARLY_EXIT = 3
 DEFAULT_INTERVIEW_ROUNDS = 10  # Reference value for prompts (not enforced)
 
 # Legacy alias for backward compatibility
@@ -136,6 +139,7 @@ class InterviewState(BaseModel):
     explore_completed: bool = False
     ambiguity_score: float | None = Field(default=None, ge=0.0, le=1.0)
     ambiguity_breakdown: dict[str, Any] | None = None
+    completion_candidate_streak: int = Field(default=0, ge=0)
 
     @property
     def current_round_number(self) -> int:
@@ -230,7 +234,7 @@ class InterviewEngine:
     state_dir: Path = field(default_factory=lambda: Path.home() / ".ouroboros" / "data")
     model: str = field(default_factory=get_clarification_model)
     temperature: float = 0.7
-    max_tokens: int = 2048
+    max_tokens: int = 512
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
@@ -420,6 +424,8 @@ class InterviewEngine:
         """Persist interview state to disk.
 
         Uses file locking to prevent race conditions during concurrent access.
+        The blocking file I/O is offloaded to a thread to avoid stalling the
+        asyncio event loop.
 
         Args:
             state: The interview state to save.
@@ -430,12 +436,14 @@ class InterviewEngine:
         try:
             file_path = self._state_file_path(state.interview_id)
             state.mark_updated()
+            # Serialize while still on the event-loop (CPU-bound, not I/O)
+            content = state.model_dump_json(indent=2)
 
-            # Use file locking to prevent race conditions
-            with _file_lock(file_path, exclusive=True):
-                # Write state as JSON
-                content = state.model_dump_json(indent=2)
-                file_path.write_text(content, encoding="utf-8")
+            def _sync_write() -> None:
+                with _file_lock(file_path, exclusive=True):
+                    file_path.write_text(content, encoding="utf-8")
+
+            await asyncio.to_thread(_sync_write)
 
             log.info(
                 "interview.state_saved",
@@ -461,6 +469,8 @@ class InterviewEngine:
         """Load interview state from disk.
 
         Uses file locking to prevent race conditions during concurrent access.
+        The blocking file I/O is offloaded to a thread to avoid stalling the
+        asyncio event loop.
 
         Args:
             interview_id: The interview ID to load.
@@ -480,9 +490,12 @@ class InterviewEngine:
             )
 
         try:
-            # Use shared lock for reading
-            with _file_lock(file_path, exclusive=False):
-                content = file_path.read_text(encoding="utf-8")
+
+            def _sync_read() -> str:
+                with _file_lock(file_path, exclusive=False):
+                    return file_path.read_text(encoding="utf-8")
+
+            content = await asyncio.to_thread(_sync_read)
 
             state = InterviewState.model_validate_json(content)
 
@@ -517,15 +530,9 @@ class InterviewEngine:
         Returns:
             The system prompt.
         """
-        import os
-
         from ouroboros.agents.loader import load_agent_prompt
 
         round_info = f"Round {state.current_round_number}"
-        preferred_web_tool = os.environ.get("OUROBOROS_WEB_SEARCH_TOOL", "").strip()
-        web_search_hint = (
-            f"\n- PREFERRED: Use {preferred_web_tool} for web search" if preferred_web_tool else ""
-        )
 
         base_prompt = load_agent_prompt("socratic-interviewer")
 
@@ -546,17 +553,20 @@ class InterviewEngine:
                 f"Initial context: {state.initial_context}\n"
             )
 
-        if web_search_hint:
-            base_prompt = base_prompt.replace("## TOOL USAGE", f"## TOOL USAGE{web_search_hint}\n")
-
+        # Answer prefix hints — always present so the question generator
+        # can interpret enriched answers regardless of brownfield status.
+        dynamic_header += (
+            "\n\nAnswer prefixes the caller may use:\n"
+            "- [from-code]: Existing codebase state (factual, read from files).\n"
+            "- [from-user]: Human decisions/judgments.\n"
+            "- [from-research]: Externally researched information (API docs, pricing, compatibility)."
+        )
         # Brownfield hint: main session handles code reading, MCP just asks questions
         if state.is_brownfield:
             dynamic_header += (
                 "\n\nThis is a BROWNFIELD project. The caller (main session) has direct "
                 "codebase access and will enrich answers with code context. Focus your "
-                "questions on INTENT and DECISIONS, not on discovering what exists. "
-                "Answers prefixed with [from-code] describe existing code state. "
-                "Answers prefixed with [from-user] are human decisions."
+                "questions on INTENT and DECISIONS, not on discovering what exists."
             )
 
         ambiguity_snapshot = self._build_ambiguity_snapshot_prompt(state)
@@ -596,20 +606,62 @@ class InterviewEngine:
         if state.ambiguity_score is None:
             return ""
 
-        from ouroboros.bigbang.ambiguity import AMBIGUITY_THRESHOLD
+        from pydantic import ValidationError as PydanticValidationError
+
+        from ouroboros.bigbang.ambiguity import (
+            AMBIGUITY_THRESHOLD,
+            AUTO_COMPLETE_STREAK_REQUIRED,
+            SEED_CLOSER_ACTIVATION_THRESHOLD,
+            AmbiguityScore,
+            ScoreBreakdown,
+            get_completion_floor_failures,
+            get_milestone,
+            get_next_milestone,
+        )
+
+        milestone, milestone_desc = get_milestone(state.ambiguity_score)
+        next_ms = get_next_milestone(state.ambiguity_score)
 
         lines = [
             "## Current Ambiguity Snapshot",
             f"- Overall ambiguity: {state.ambiguity_score:.2f}",
-            f"- Seed-ready threshold: {AMBIGUITY_THRESHOLD:.2f}",
-            (
-                "- Seed-ready now: yes"
-                if state.ambiguity_score <= AMBIGUITY_THRESHOLD
-                else "- Seed-ready now: no"
-            ),
+            f"- Milestone: **{milestone.value.upper()}** — {milestone_desc}",
         ]
+        if next_ms is not None:
+            lines.append(
+                f"- Next milestone: {next_ms[1].value} (<= {next_ms[0]:.1f}) — {next_ms[2]}"
+            )
+        lines.extend(
+            [
+                f"- Seed-ready threshold: {AMBIGUITY_THRESHOLD:.2f}",
+                f"- Closure-mode threshold: {SEED_CLOSER_ACTIVATION_THRESHOLD:.2f}",
+                (
+                    "- Seed-ready now: yes"
+                    if state.ambiguity_score <= AMBIGUITY_THRESHOLD
+                    else "- Seed-ready now: no"
+                ),
+                (
+                    "- Closure mode active: yes"
+                    if state.ambiguity_score <= SEED_CLOSER_ACTIVATION_THRESHOLD
+                    else "- Closure mode active: no"
+                ),
+                (
+                    "- Completion candidate streak: "
+                    f"{state.completion_candidate_streak}/{AUTO_COMPLETE_STREAK_REQUIRED}"
+                ),
+            ]
+        )
 
+        reconstructed_score: AmbiguityScore | None = None
         if isinstance(state.ambiguity_breakdown, dict):
+            try:
+                reconstructed_score = AmbiguityScore(
+                    overall_score=state.ambiguity_score,
+                    breakdown=ScoreBreakdown.model_validate(state.ambiguity_breakdown),
+                )
+            except PydanticValidationError:
+                reconstructed_score = None
+
             weakest_components: list[tuple[float, str, str]] = []
             for payload in state.ambiguity_breakdown.values():
                 if not isinstance(payload, dict):
@@ -631,13 +683,28 @@ class InterviewEngine:
                 if justification:
                     lines.append(f"  Reason: {justification}")
 
+        if reconstructed_score is not None:
+            floor_failures = get_completion_floor_failures(
+                reconstructed_score,
+                is_brownfield=state.is_brownfield,
+            )
+            if floor_failures:
+                lines.append(f"- Completion floors unmet: {'; '.join(floor_failures)}")
+            else:
+                lines.append("- Completion floors: passed")
+
         lines.append(
-            "- Use this snapshot to decide whether the next turn should close the interview or ask one more targeted question."
+            "- Use this snapshot to drill into the weakest area until closure mode is active."
+        )
+        lines.append(
+            "- A single seed-ready score is not enough to end the interview; require sustained clarity before asking a closure question."
         )
         return "\n".join(lines)
 
     def _select_perspectives(self, state: InterviewState) -> tuple[InterviewPerspective, ...]:
         """Choose the active perspective panel for the current round."""
+        from ouroboros.bigbang.ambiguity import SEED_CLOSER_ACTIVATION_THRESHOLD
+
         perspectives: list[InterviewPerspective] = [InterviewPerspective.BREADTH_KEEPER]
 
         if state.current_round_number <= 2:
@@ -658,11 +725,17 @@ class InterviewEngine:
         else:
             perspectives.extend(
                 [
+                    InterviewPerspective.RESEARCHER,
                     InterviewPerspective.SIMPLIFIER,
                     InterviewPerspective.ARCHITECT,
-                    InterviewPerspective.SEED_CLOSER,
                 ]
             )
+
+        if (
+            state.ambiguity_score is not None
+            and state.ambiguity_score <= SEED_CLOSER_ACTIVATION_THRESHOLD
+        ):
+            perspectives.append(InterviewPerspective.SEED_CLOSER)
 
         if state.is_brownfield and InterviewPerspective.ARCHITECT not in perspectives:
             perspectives.append(InterviewPerspective.ARCHITECT)
@@ -699,7 +772,8 @@ class InterviewEngine:
                 "- If one file, abstraction, or bug has dominated several rounds, zoom back out before going deeper.",
                 "- Preserve both implementation and written-output requirements when the user asked for both.",
                 "- Prefer breadth recap questions when multiple unresolved tracks still exist.",
-                "- When the interview is already seed-ready, ask a closure question instead of opening a new deep branch.",
+                "- Only ask a closure question when closure mode is active; otherwise keep drilling into the weakest area.",
+                "- Even when the score is seed-ready, do not end the interview on the first low-ambiguity turn.",
             ]
         )
 

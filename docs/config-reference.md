@@ -1,6 +1,6 @@
 <!--
 doc_metadata:
-  runtime_scope: [local, claude, codex]
+  runtime_scope: [local, claude, codex, opencode]
 -->
 
 # Configuration Reference
@@ -75,7 +75,7 @@ Controls how Ouroboros launches and communicates with the agent runtime backend.
 
 ```yaml
 orchestrator:
-  runtime_backend: claude       # "claude" | "codex" | "opencode" (opencode: not yet implemented)
+  runtime_backend: claude       # "claude" | "codex" | "opencode"
   permission_mode: acceptEdits  # "default" | "acceptEdits" | "bypassPermissions"
   opencode_permission_mode: bypassPermissions
   cli_path: null                # Path to Claude CLI binary; null = use SDK default
@@ -93,8 +93,6 @@ orchestrator:
 | `codex_cli_path` | `string \| null` | `null` | Absolute path to the Codex CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_CODEX_CLI_PATH`. |
 | `opencode_cli_path` | `string \| null` | `null` | Absolute path to the OpenCode CLI binary (`~` is expanded). When `null`, resolved from `PATH` at runtime. Overridable via `OUROBOROS_OPENCODE_CLI_PATH`. |
 | `default_max_turns` | `int >= 1` | `10` | Default maximum number of turns per agent execution task. |
-
-> **OpenCode scope note:** The `opencode` runtime backend is **not yet implemented** — setting `runtime_backend: opencode` will raise `NotImplementedError` at runtime. The `opencode_*` options are listed here for forward-compatibility; support is planned for a future release.
 
 ---
 
@@ -427,6 +425,7 @@ All environment variables have higher priority than the corresponding `config.ya
 | `OUROBOROS_CLI_PATH` | `orchestrator.cli_path` | Path to the Claude CLI binary. |
 | `OUROBOROS_CODEX_CLI_PATH` | `orchestrator.codex_cli_path` | Path to the Codex CLI binary. |
 | `OUROBOROS_OPENCODE_CLI_PATH` | `orchestrator.opencode_cli_path` | Path to the OpenCode CLI binary. |
+| `OUROBOROS_SKIP_VERSION_CHECK` | *(none)* | Controls the Claude Agent SDK per-call version compatibility check. Defaults to `"1"` (skip the check, saving ~0.3-0.8 s per LLM call). Set to `"0"` to re-enable the check for debugging version-mismatch issues. Maps to `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` internally. |
 
 ### LLM Flow
 
@@ -538,6 +537,23 @@ consensus:
 ```
 
 This is the recommended Ouroboros-side pattern for Codex users. Keep `~/.codex/config.toml` limited to the MCP/env block created by setup.
+
+### OpenCode Runtime
+
+```yaml
+# ~/.ouroboros/config.yaml
+orchestrator:
+  runtime_backend: opencode
+  opencode_cli_path: /usr/local/bin/opencode   # omit if opencode is already on PATH
+
+llm:
+  backend: opencode
+
+logging:
+  level: info
+```
+
+OpenCode supports multiple model providers (Anthropic, OpenAI, Google, and others). Model selection is configured in OpenCode itself (`~/.config/opencode/opencode.jsonc` or `opencode.json`), not in `config.yaml`. The `orchestrator.opencode_permission_mode` defaults to `bypassPermissions` since OpenCode runs non-interactively via `opencode run --format json`. The `llm.opencode_permission_mode` defaults to `acceptEdits`, but the factory forces `bypassPermissions` for interview/seed use cases to avoid CLI sandbox blocking.
 
 ### Full Config Skeleton
 

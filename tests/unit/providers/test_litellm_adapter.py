@@ -128,6 +128,26 @@ class TestLiteLLMAdapterGetApiKey:
 
         assert result == "or-key"
 
+    def test_unknown_model_uses_openrouter_credentials_fallback(self) -> None:
+        """Unknown models can resolve credentials from the openrouter provider."""
+        adapter = LiteLLMAdapter()
+        credentials = CredentialsConfig(
+            providers={
+                "openrouter": ProviderCredentials(
+                    api_key="cred-openrouter-key",
+                    base_url="https://openrouter.example/v1",
+                ),
+            }
+        )
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(adapter, "_load_credentials_config", return_value=credentials),
+        ):
+            result = adapter._get_api_key("acme/gpt-4-custom")
+
+        assert result == "cred-openrouter-key"
+
     def test_missing_env_var_returns_none(self) -> None:
         """Returns None if no environment variable is set."""
         adapter = LiteLLMAdapter()
@@ -563,7 +583,7 @@ class TestLiteLLMAdapterComplete:
 
 
 class TestLiteLLMAdapterRetryBehavior:
-    """Test retry behavior using stamina."""
+    """Test retry behavior for transient provider failures."""
 
     async def test_retries_on_rate_limit(self) -> None:
         """Retries on rate limit error before giving up."""

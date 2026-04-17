@@ -118,18 +118,18 @@ Under the hood, `CodexCliRuntime` still talks to the local `codex` executable, b
 
 ### `ooo` Skill Availability on Codex
 
-After running `ouroboros setup --runtime codex`, all 15 `ooo` skills are installed into `~/.codex/skills/` and the routing rules into `~/.codex/rules/`. The table below shows each skill and its CLI equivalent for terminal-only workflows.
+After running `ouroboros setup --runtime codex`, the bundled `ooo` skills are installed into `~/.codex/skills/` and the routing rules into `~/.codex/rules/`. The table below shows each skill and its CLI equivalent for terminal-only workflows.
 
 | `ooo` Skill | Codex session | CLI equivalent (Terminal) |
 |-------------|---------------|--------------------------|
 | `ooo interview` | Yes | `ouroboros init start --llm-backend codex "your idea"` |
 | `ooo seed` | Yes | *(bundled in `ouroboros init start`)* |
 | `ooo run` | Yes | `ouroboros run workflow --runtime codex seed.yaml` |
-| `ooo status` | Yes | `ouroboros status execution <session_id>` |
+| `ooo status` | Yes | `ouroboros status execution <execution_id>` |
 | `ooo evaluate` | Yes | *(MCP only)* |
 | `ooo evolve` | Yes | *(MCP only)* |
 | `ooo ralph` | Yes | *(MCP only)* |
-| `ooo cancel` | Yes | `ouroboros cancel execution <session_id>` |
+| `ooo cancel` | Yes | `ouroboros cancel execution <execution_id>` |
 | `ooo unstuck` | Yes | *(MCP only)* |
 | `ooo tutorial` | Yes | *(MCP only)* |
 | `ooo welcome` | Yes | *(MCP only)* |
@@ -137,8 +137,11 @@ After running `ouroboros setup --runtime codex`, all 15 `ooo` skills are install
 | `ooo help` | Yes | `ouroboros --help` |
 | `ooo qa` | Yes | *(MCP only)* |
 | `ooo setup` | Yes | `ouroboros setup --runtime codex` |
+| `ooo publish` | Yes | *(no direct `ouroboros publish` subcommand; skill/runtime flow uses `gh` CLI)* |
 
 > **Note on `ooo seed` vs `ooo interview`:** These are two distinct skills with separate roles. `ooo interview` runs a Socratic Q&A session and returns a `session_id`. `ooo seed` accepts that `session_id` and generates a structured Seed YAML (with ambiguity scoring). From the terminal, both steps are performed in a single `ouroboros init start` invocation.
+
+> **Note on `ooo publish`:** In Codex sessions, `ooo publish` is provided as a skill/runtime surface after setup installs the managed rules and skills. It currently relies on the external `gh` CLI plus GitHub authentication, rather than a dedicated `ouroboros publish` shell subcommand.
 
 ## Quick Start
 

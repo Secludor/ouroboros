@@ -5,6 +5,7 @@ Contains handlers for interview and seed generation tools:
 - InterviewHandler: Manages interactive requirement-clarification interviews.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
@@ -17,10 +18,14 @@ import yaml
 
 from ouroboros.bigbang.ambiguity import (
     AMBIGUITY_THRESHOLD,
+    AUTO_COMPLETE_STREAK_REQUIRED,
     AmbiguityScore,
     AmbiguityScorer,
     ComponentScore,
     ScoreBreakdown,
+    get_completion_floor_failures,
+    get_milestone,
+    qualifies_for_seed_completion,
 )
 from ouroboros.bigbang.interview import (
     MIN_ROUNDS_BEFORE_EARLY_EXIT,
@@ -124,14 +129,65 @@ def _count_answered_rounds(state: InterviewState) -> int:
     return sum(1 for round_data in state.rounds if round_data.user_response is not None)
 
 
+def _update_completion_candidate_streak(
+    state: InterviewState,
+    score: AmbiguityScore,
+) -> bool:
+    """Update and return whether the current score qualifies for auto-completion."""
+    qualifies = qualifies_for_seed_completion(score, is_brownfield=state.is_brownfield)
+    if qualifies:
+        state.completion_candidate_streak += 1
+    else:
+        state.completion_candidate_streak = 0
+    return qualifies
+
+
+def _completion_gate_reason(
+    score: AmbiguityScore | None,
+    *,
+    is_brownfield: bool,
+) -> str:
+    """Describe the strongest reason interview completion is still blocked."""
+    if score is None:
+        return f"ambiguity score could not be confirmed against threshold {AMBIGUITY_THRESHOLD:.2f}"
+    if score.overall_score > AMBIGUITY_THRESHOLD:
+        return (
+            f"ambiguity score {score.overall_score:.2f} exceeds threshold {AMBIGUITY_THRESHOLD:.2f}"
+        )
+
+    floor_failures = get_completion_floor_failures(score, is_brownfield=is_brownfield)
+    if floor_failures:
+        return f"completion floors are unmet ({'; '.join(floor_failures)})"
+
+    return "requirements are not stable enough to close yet"
+
+
+def _milestone_for_score(score: AmbiguityScore | None) -> str | None:
+    """Return the milestone label for an ambiguity score, or None."""
+    if score is None:
+        return None
+    milestone, _ = get_milestone(score.overall_score)
+    return milestone.value
+
+
 def _format_question_with_ambiguity(question: str, score: AmbiguityScore | None) -> str:
-    """Attach the current ambiguity score to a question for display."""
+    """Attach the current ambiguity score to a question for display.
+
+    The text format uses ``(ambiguity: <score>)`` without the milestone
+    label to preserve backward compatibility with downstream consumers
+    that parse the score via regex.  Milestone data is available in the
+    structured ``meta.milestone`` field of the MCP response.
+    """
     if score is None:
         return question
     return f"(ambiguity: {score.overall_score:.2f}) {question}"
 
 
-def _ambiguity_warning_for_failed_question(score: AmbiguityScore | None) -> str:
+def _ambiguity_warning_for_failed_question(
+    score: AmbiguityScore | None,
+    *,
+    is_brownfield: bool = False,
+) -> str:
     """Build an explicit ambiguity warning for question-generation failures.
 
     When question generation fails mid-interview, the main session must NOT
@@ -150,6 +206,14 @@ def _ambiguity_warning_for_failed_question(score: AmbiguityScore | None) -> str:
             f"(threshold: {AMBIGUITY_THRESHOLD}). "
             f"The interview is NOT complete — do NOT generate a Seed. "
             f"Resume the interview to continue clarifying requirements."
+        )
+    floor_failures = get_completion_floor_failures(score, is_brownfield=is_brownfield)
+    if floor_failures:
+        return (
+            "\n\nWARNING: Ambiguity is low, but completion floors are unmet "
+            f"({'; '.join(floor_failures)}). "
+            "The interview is NOT complete — do NOT generate a Seed. "
+            "Resume the interview to continue clarifying requirements."
         )
     return ""
 
@@ -197,6 +261,21 @@ def _load_state_ambiguity_score(state: InterviewState) -> AmbiguityScore | None:
         overall_score=state.ambiguity_score,
         breakdown=breakdown,
     )
+
+
+def _stored_ambiguity_snapshot_is_degraded(state: InterviewState) -> bool:
+    """Return True when stored ambiguity data lacks a parseable breakdown."""
+    if state.ambiguity_score is None:
+        return True
+    if not isinstance(state.ambiguity_breakdown, dict):
+        return True
+
+    try:
+        ScoreBreakdown.model_validate(state.ambiguity_breakdown)
+    except PydanticValidationError:
+        return True
+
+    return False
 
 
 @dataclass
@@ -469,6 +548,8 @@ class InterviewHandler:
         self._owns_event_store = self.event_store is None
         self._event_store = self.event_store or EventStore()
         self._initialized = False
+        self._closed = False
+        self._bg_tasks: set[asyncio.Task] = set()
 
     async def _ensure_initialized(self) -> None:
         """Ensure the event store is initialized."""
@@ -476,8 +557,23 @@ class InterviewHandler:
             await self._event_store.initialize()
             self._initialized = True
 
+    async def _drain_bg_tasks(self, timeout: float = 5.0) -> None:
+        """Await all pending background event tasks before shutdown."""
+        if not self._bg_tasks:
+            return
+        tasks = list(self._bg_tasks)
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        for t in pending:
+            t.cancel()
+        # Await cancelled tasks so CancelledError propagates cleanly
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._bg_tasks.clear()
+
     async def close(self) -> None:
-        """Close the event store if this handler owns it."""
+        """Drain pending event tasks, then close the event store if owned."""
+        self._closed = True
+        await self._drain_bg_tasks()
         if self._owns_event_store:
             await self._event_store.close()
             self._initialized = False
@@ -489,6 +585,14 @@ class InterviewHandler:
             await self._event_store.append(event)
         except Exception as e:
             log.warning("mcp.tool.interview.event_emission_failed", error=str(e))
+
+    def _emit_event_bg(self, event: Any) -> None:
+        """Fire-and-forget event emission — non-blocking on the hot path."""
+        if self._closed:
+            return
+        task = asyncio.create_task(self._emit_event(event))
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
 
     async def _score_interview_state(
         self,
@@ -504,6 +608,9 @@ class InterviewHandler:
         score_result = await scorer.score(state)
         if score_result.is_err:
             state.clear_stored_ambiguity()
+            if state.completion_candidate_streak != 0:
+                state.completion_candidate_streak = 0
+                state.mark_updated()
             log.warning(
                 "mcp.tool.interview.live_ambiguity_failed",
                 interview_id=state.interview_id,
@@ -512,6 +619,7 @@ class InterviewHandler:
             return None
 
         score = score_result.value
+        _update_completion_candidate_streak(state, score)
         state.store_ambiguity(
             score=score.overall_score,
             breakdown=score.breakdown.model_dump(mode="json"),
@@ -522,18 +630,20 @@ class InterviewHandler:
     def _ambiguity_gate_response(
         session_id: str,
         score: AmbiguityScore | None,
+        *,
+        is_brownfield: bool,
     ) -> Result[MCPToolResult, MCPServerError]:
         """Build an MCP response refusing premature interview completion."""
         score_display = f"{score.overall_score:.2f}" if score is not None else "unknown"
+        gate_reason = _completion_gate_reason(score, is_brownfield=is_brownfield)
         return Result.ok(
             MCPToolResult(
                 content=(
                     MCPContentItem(
                         type=ContentType.TEXT,
                         text=(
-                            f"Cannot complete yet — ambiguity score "
-                            f"{score_display} exceeds threshold "
-                            f"{AMBIGUITY_THRESHOLD}. "
+                            f"Cannot complete yet — {gate_reason}. "
+                            f"Current ambiguity: {score_display}. "
                             f"Please answer a few more questions to "
                             f"clarify remaining areas."
                         ),
@@ -543,6 +653,7 @@ class InterviewHandler:
                 meta={
                     "session_id": session_id,
                     "ambiguity_score": (score.overall_score if score is not None else None),
+                    "milestone": _milestone_for_score(score),
                     "seed_ready": False,
                 },
             )
@@ -575,7 +686,7 @@ class InterviewHandler:
 
         from ouroboros.events.interview import interview_completed
 
-        await self._emit_event(
+        self._emit_event_bg(
             interview_completed(
                 interview_id=session_id,
                 total_rounds=len(state.rounds),
@@ -603,6 +714,7 @@ class InterviewHandler:
                     "session_id": session_id,
                     "completed": True,
                     "ambiguity_score": score.overall_score if score is not None else None,
+                    "milestone": _milestone_for_score(score),
                     "seed_ready": score.is_ready_for_seed if score is not None else None,
                 },
             )
@@ -706,13 +818,17 @@ class InterviewHandler:
 
                 state = result.value
                 _interview_id = state.interview_id
-                live_score = await self._score_interview_state(llm_adapter, state)
+                # No answers exist yet — scoring cannot trigger completion
+                # and would waste an LLM call (~3-8s). The PM handler
+                # already skips scoring before MIN_ROUNDS_BEFORE_EARLY_EXIT
+                # (pm_interview.py:889); apply the same optimisation here.
+                live_score = None
                 question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
                     from ouroboros.events.interview import interview_failed
 
-                    await self._emit_event(
+                    self._emit_event_bg(
                         interview_failed(
                             state.interview_id,
                             error_msg,
@@ -723,7 +839,10 @@ class InterviewHandler:
                     if "empty response" in error_msg.lower():
                         # Persist state so the session can actually be resumed
                         await engine.save_state(state)
-                        amb_warning = _ambiguity_warning_for_failed_question(live_score)
+                        amb_warning = _ambiguity_warning_for_failed_question(
+                            live_score,
+                            is_brownfield=state.is_brownfield,
+                        )
                         stderr_info = ""
                         err = question_result.error
                         if hasattr(err, "details") and isinstance(err.details, dict):
@@ -776,7 +895,7 @@ class InterviewHandler:
                 # Emit interview started event
                 from ouroboros.events.interview import interview_started
 
-                await self._emit_event(
+                self._emit_event_bg(
                     interview_started(
                         state.interview_id,
                         resolved_context.value,
@@ -805,6 +924,7 @@ class InterviewHandler:
                             "ambiguity_score": (
                                 live_score.overall_score if live_score is not None else None
                             ),
+                            "milestone": _milestone_for_score(live_score),
                             "seed_ready": (
                                 live_score.is_ready_for_seed if live_score is not None else None
                             ),
@@ -843,6 +963,11 @@ class InterviewHandler:
                             meta={
                                 "session_id": session_id,
                                 "ambiguity_score": state.ambiguity_score,
+                                "milestone": (
+                                    get_milestone(state.ambiguity_score)[0].value
+                                    if state.ambiguity_score is not None
+                                    else None
+                                ),
                                 "seed_ready": (
                                     state.ambiguity_score is not None
                                     and state.ambiguity_score <= AMBIGUITY_THRESHOLD
@@ -859,9 +984,19 @@ class InterviewHandler:
                         # Gate: check ambiguity before completing.
                         # Stored score first; live scoring as fallback.
                         exit_score = _load_state_ambiguity_score(state)
-                        if exit_score is None or not exit_score.is_ready_for_seed:
+                        if (
+                            exit_score is None
+                            or _stored_ambiguity_snapshot_is_degraded(state)
+                            or not qualifies_for_seed_completion(
+                                exit_score,
+                                is_brownfield=state.is_brownfield,
+                            )
+                        ):
                             exit_score = await self._score_interview_state(llm_adapter, state)
-                        if exit_score is not None and exit_score.is_ready_for_seed:
+                        if exit_score is not None and qualifies_for_seed_completion(
+                            exit_score,
+                            is_brownfield=state.is_brownfield,
+                        ):
                             return await self._complete_interview_response(
                                 engine,
                                 state,
@@ -870,7 +1005,11 @@ class InterviewHandler:
                             )
                         # Ambiguity too high — refuse completion
                         await engine.save_state(state)
-                        return self._ambiguity_gate_response(session_id, exit_score)
+                        return self._ambiguity_gate_response(
+                            session_id,
+                            exit_score,
+                            is_brownfield=state.is_brownfield,
+                        )
 
                     if not state.rounds:
                         return Result.err(
@@ -901,7 +1040,7 @@ class InterviewHandler:
                     # Emit response recorded event
                     from ouroboros.events.interview import interview_response_recorded
 
-                    await self._emit_event(
+                    self._emit_event_bg(
                         interview_response_recorded(
                             interview_id=session_id,
                             round_number=len(state.rounds),
@@ -919,28 +1058,49 @@ class InterviewHandler:
                     # question generation failures downstream
                     await engine.save_state(state)
 
-                    live_score = await self._score_interview_state(llm_adapter, state)
-                    if (
-                        live_score is not None
-                        and live_score.is_ready_for_seed
-                        and _count_answered_rounds(state) >= MIN_ROUNDS_BEFORE_EARLY_EXIT
-                    ):
-                        return await self._complete_interview_response(
-                            engine,
-                            state,
-                            session_id,
-                            live_score,
-                        )
+                    # Only score ambiguity when completion is actually
+                    # possible. Before MIN_ROUNDS_BEFORE_EARLY_EXIT the
+                    # result cannot trigger early exit, so the LLM call
+                    # (~3-8 s) is pure waste. Once scoring starts, run it
+                    # before question generation so the next prompt sees
+                    # the latest ambiguity snapshot, closure threshold,
+                    # and completion-candidate streak.
+                    answered = _count_answered_rounds(state)
+                    if answered >= MIN_ROUNDS_BEFORE_EARLY_EXIT:
+                        # Scoring must complete before question generation:
+                        # _score_interview_state mutates state.ambiguity_score,
+                        # completion_candidate_streak, and ambiguity_breakdown.
+                        # ask_next_question reads those fields to build the
+                        # system prompt (closure mode, seed-ready, streak).
+                        # Running them in parallel would give the question
+                        # generator stale routing context.
+                        live_score = await self._score_interview_state(llm_adapter, state)
+                        if (
+                            live_score is not None
+                            and qualifies_for_seed_completion(
+                                live_score,
+                                is_brownfield=state.is_brownfield,
+                            )
+                            and state.completion_candidate_streak >= AUTO_COMPLETE_STREAK_REQUIRED
+                        ):
+                            return await self._complete_interview_response(
+                                engine,
+                                state,
+                                session_id,
+                                live_score,
+                            )
+                        question_result = await engine.ask_next_question(state)
+                    else:
+                        live_score = None
+                        question_result = await engine.ask_next_question(state)
                 else:
                     live_score = _load_state_ambiguity_score(state)
-
-                # Generate next question (whether resuming or after recording answer)
-                question_result = await engine.ask_next_question(state)
+                    question_result = await engine.ask_next_question(state)
                 if question_result.is_err:
                     error_msg = str(question_result.error)
                     from ouroboros.events.interview import interview_failed
 
-                    await self._emit_event(
+                    self._emit_event_bg(
                         interview_failed(
                             session_id,
                             error_msg,
@@ -948,7 +1108,10 @@ class InterviewHandler:
                         )
                     )
                     if "empty response" in error_msg.lower():
-                        amb_warning = _ambiguity_warning_for_failed_question(live_score)
+                        amb_warning = _ambiguity_warning_for_failed_question(
+                            live_score,
+                            is_brownfield=state.is_brownfield,
+                        )
                         # Extract stderr from ProviderError details for diagnostics
                         stderr_info = ""
                         err = question_result.error
@@ -1017,6 +1180,7 @@ class InterviewHandler:
                             "ambiguity_score": (
                                 live_score.overall_score if live_score is not None else None
                             ),
+                            "milestone": _milestone_for_score(live_score),
                             "seed_ready": (
                                 live_score.is_ready_for_seed if live_score is not None else None
                             ),
@@ -1037,7 +1201,7 @@ class InterviewHandler:
             if _interview_id:
                 from ouroboros.events.interview import interview_failed
 
-                await self._emit_event(
+                self._emit_event_bg(
                     interview_failed(
                         _interview_id,
                         str(e),
