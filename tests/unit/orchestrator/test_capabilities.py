@@ -6,10 +6,13 @@ from dataclasses import replace
 
 from ouroboros.mcp.types import MCPToolDefinition
 from ouroboros.orchestrator.capabilities import (
+    CapabilityApprovalClass,
     CapabilityMutationClass,
     CapabilityOrigin,
+    CapabilityParallelSafety,
     CapabilityScope,
     build_capability_graph,
+    load_tool_capability_overrides,
     normalize_serialized_capability_graph,
     serialize_capability_graph,
 )
@@ -67,3 +70,35 @@ def test_build_capability_graph_records_inherited_capabilities_without_entries()
     assert inherited.source_kind == "inherited_capability"
     assert inherited.semantics.origin is CapabilityOrigin.ATTACHED_MCP
     assert inherited.semantics.scope is CapabilityScope.ATTACHMENT
+
+
+def test_build_capability_graph_applies_attached_tool_override(tmp_path) -> None:
+    override_path = tmp_path / "tool_capabilities.yaml"
+    override_path.write_text(
+        """
+tools:
+  browser:chrome_navigate:
+    mutation_class: read_only
+    parallel_safety: safe
+    interruptibility: none
+    approval_class: default
+""",
+        encoding="utf-8",
+    )
+    overrides = load_tool_capability_overrides(override_path)
+    catalog = assemble_session_tool_catalog(
+        attached_tools=(
+            MCPToolDefinition(
+                name="chrome_navigate",
+                description="Navigate the browser",
+                server_name="browser",
+            ),
+        ),
+    )
+
+    graph = build_capability_graph(catalog, capability_overrides=overrides)
+
+    descriptor = graph.capabilities[0]
+    assert descriptor.semantics.mutation_class is CapabilityMutationClass.READ_ONLY
+    assert descriptor.semantics.parallel_safety is CapabilityParallelSafety.SAFE
+    assert descriptor.semantics.approval_class is CapabilityApprovalClass.DEFAULT
