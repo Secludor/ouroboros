@@ -311,9 +311,7 @@ class TestACTreeWidget:
 
         widget.update_tree(updated_tree)
 
-        assert any(
-            call.kwargs.get("recompose") is True for call in widget.refresh.call_args_list
-        )
+        assert any(call.kwargs.get("recompose") is True for call in widget.refresh.call_args_list)
         assert widget._node_map == {}
 
     def test_update_tree_syncs_existing_labels_for_rapid_subtask_status_changes(self) -> None:

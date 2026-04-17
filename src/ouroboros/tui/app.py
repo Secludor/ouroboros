@@ -192,9 +192,7 @@ class OuroborosTUI(App[None]):
             return False
         if self._execution_id != context.execution_id:
             return False
-        if context.session_id and self._state.session_id != context.session_id:
-            return False
-        return True
+        return not (context.session_id and self._state.session_id != context.session_id)
 
     def _iter_subscription_sources(
         self, context: _EventSubscriptionContext
@@ -257,9 +255,7 @@ class OuroborosTUI(App[None]):
         if self._event_store is None or not context.execution_id:
             return
 
-        last_row_ids = {
-            source: 0 for source in self._iter_subscription_sources(context)
-        }
+        last_row_ids = dict.fromkeys(self._iter_subscription_sources(context), 0)
 
         while self._is_subscription_active(context):
             try:

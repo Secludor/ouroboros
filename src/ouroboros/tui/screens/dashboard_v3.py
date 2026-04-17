@@ -27,8 +27,8 @@ Layout:
 
 from __future__ import annotations
 
-import contextlib
 from collections.abc import Mapping
+import contextlib
 from typing import TYPE_CHECKING, Any
 
 from textual.app import ComposeResult
