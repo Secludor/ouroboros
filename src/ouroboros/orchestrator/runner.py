@@ -54,7 +54,7 @@ from ouroboros.orchestrator.events import (
     create_drift_measured_event,
     create_execution_terminal_event,
     create_mcp_tools_loaded_event,
-    create_policy_capability_evaluated_event,
+    create_policy_capabilities_evaluated_event,
     create_progress_event,
     create_session_completed_event,
     create_session_failed_event,
@@ -526,20 +526,15 @@ class OrchestratorRunner:
         policy_decisions: tuple[PolicyDecision, ...],
         policy_context: PolicyContext,
     ) -> None:
-        """Persist per-capability policy decisions for audit/debuggability."""
-        decisions_by_id = {decision.stable_id: decision for decision in policy_decisions}
-        for descriptor in capability_graph.capabilities:
-            decision = decisions_by_id.get(descriptor.stable_id)
-            if decision is None:
-                continue
-            await self._event_store.append(
-                create_policy_capability_evaluated_event(
-                    session_id=session_id,
-                    descriptor=descriptor,
-                    decision=decision,
-                    context=policy_context,
-                )
+        """Persist capability policy decisions for audit/debuggability."""
+        await self._event_store.append(
+            create_policy_capabilities_evaluated_event(
+                session_id=session_id,
+                graph=capability_graph,
+                decisions=policy_decisions,
+                context=policy_context,
             )
+        )
 
     def _seed_runtime_handle(
         self,

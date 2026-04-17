@@ -2344,19 +2344,22 @@ class TestOrchestratorRunnerWithMCP:
         policy_events = [
             call.args[0]
             for call in mock_event_store.append.await_args_list
-            if getattr(call.args[0], "type", None) == "policy.capability.evaluated"
+            if getattr(call.args[0], "type", None) == "policy.capabilities.evaluated"
         ]
-        events_by_name = {event.data["capability"]["name"]: event for event in policy_events}
+        assert len(policy_events) == 1
+        events_by_name = {
+            item["capability"]["name"]: item for item in policy_events[0].data["evaluations"]
+        }
 
         read_event = events_by_name["Read"]
-        assert read_event.data["decision"]["visible"] is True
-        assert read_event.data["decision"]["executable"] is True
+        assert read_event["decision"]["visible"] is True
+        assert read_event["decision"]["executable"] is True
 
         inherited_event = events_by_name["mcp__chrome-devtools__click"]
-        assert inherited_event.data["capability"]["source_kind"] == "inherited_capability"
-        assert inherited_event.data["decision"]["visible"] is True
-        assert inherited_event.data["decision"]["executable"] is False
-        assert inherited_event.data["decision"]["reasons"] == [
+        assert inherited_event["capability"]["source_kind"] == "inherited_capability"
+        assert inherited_event["decision"]["visible"] is True
+        assert inherited_event["decision"]["executable"] is False
+        assert inherited_event["decision"]["reasons"] == [
             "inherited_capability requires live provider discovery before execution"
         ]
 
