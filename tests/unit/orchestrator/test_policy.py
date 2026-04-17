@@ -11,6 +11,7 @@ from ouroboros.orchestrator.policy import (
     PolicyExecutionPhase,
     PolicySessionRole,
     allowed_capability_names,
+    allowed_runtime_builtin_tool_names,
     evaluate_capability_policy,
 )
 
@@ -69,3 +70,18 @@ def test_inherited_capability_is_auditable_but_not_executable() -> None:
     assert inherited.reasons == (
         "inherited_capability requires live provider discovery before execution",
     )
+
+
+def test_read_only_roles_derive_runtime_builtin_envelope_from_policy() -> None:
+    allowed = allowed_runtime_builtin_tool_names(
+        PolicyContext(
+            runtime_backend="opencode",
+            session_role=PolicySessionRole.EVALUATION,
+            execution_phase=PolicyExecutionPhase.EVALUATION,
+        )
+    )
+
+    assert allowed == ["Read", "Glob", "Grep", "WebFetch", "WebSearch"]
+    assert "Edit" not in allowed
+    assert "Write" not in allowed
+    assert "Bash" not in allowed

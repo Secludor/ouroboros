@@ -10,6 +10,11 @@ from ouroboros.orchestrator.capabilities import (
     CapabilityDescriptor,
     CapabilityGraph,
     CapabilityMutationClass,
+    build_capability_graph,
+)
+from ouroboros.orchestrator.mcp_tools import (
+    assemble_session_tool_catalog,
+    enumerate_runtime_builtin_tool_definitions,
 )
 
 
@@ -158,6 +163,19 @@ def allowed_capability_names(
     ]
 
 
+def allowed_runtime_builtin_tool_names(
+    context: PolicyContext,
+    *,
+    builtin_tools: tuple[str, ...] | None = None,
+) -> list[str]:
+    """Return executable built-in runtime tools for a policy context."""
+    tool_names = builtin_tools or tuple(
+        definition.name for definition in enumerate_runtime_builtin_tool_definitions()
+    )
+    graph = build_capability_graph(assemble_session_tool_catalog(tool_names))
+    return allowed_capability_names(graph, context)
+
+
 __all__ = [
     "PolicyContext",
     "PolicyDecision",
@@ -165,5 +183,6 @@ __all__ = [
     "PolicySessionRole",
     "RoleCapabilityProfile",
     "allowed_capability_names",
+    "allowed_runtime_builtin_tool_names",
     "evaluate_capability_policy",
 ]
