@@ -1130,7 +1130,8 @@ class ACTreeHUDHandler:
                 new_event_ids = {
                     event_id
                     for event in new_events
-                    if (event_id := _coerce_non_empty_string(getattr(event, "id", None))) is not None
+                    if (event_id := _coerce_non_empty_string(getattr(event, "id", None)))
+                    is not None
                 }
                 previous_execution_history = [
                     event
