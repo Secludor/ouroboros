@@ -18,7 +18,7 @@ from rich.console import Console
 import typer
 
 from ouroboros.cli.commands.mcp_doctor import register_doctor_command
-from ouroboros.cli.formatters.panels import print_error, print_info, print_success
+from ouroboros.cli.formatters.panels import print_info, print_success
 
 # PID file for detecting stale instances
 _PID_DIR = Path.home() / ".ouroboros"
