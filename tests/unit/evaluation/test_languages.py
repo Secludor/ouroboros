@@ -1,5 +1,6 @@
 """Tests for language detection and mechanical config building."""
 
+import json
 from pathlib import Path
 
 from ouroboros.evaluation.languages import (
@@ -7,6 +8,11 @@ from ouroboros.evaluation.languages import (
     build_mechanical_config,
     detect_language,
 )
+
+
+def _write_package_json(path: Path, data: dict[str, object]) -> None:
+    """Write ``package.json`` at ``path`` with the given dict body."""
+    (path / "package.json").write_text(json.dumps(data))
 
 
 class TestDetectLanguage:
@@ -323,6 +329,173 @@ class TestBuildMechanicalConfig:
         (tmp_path / "build.zig").touch()
         config = build_mechanical_config(tmp_path)
         assert config.build_command == ("zig", "build")
+
+
+class TestNodePresetRefinement:
+    """Node presets must be refined against the actual package manifest.
+
+    Stage 1 favors skipping over running the wrong tool: a missing lint
+    script, a misconfigured test runner, or a stale build script must
+    downgrade to ``None`` (skip) rather than produce a phantom failure.
+    """
+
+    def _with_lockfile(self, tmp_path: Path, manifest: dict[str, object]) -> Path:
+        _write_package_json(tmp_path, manifest)
+        (tmp_path / "package-lock.json").touch()
+        return tmp_path
+
+    def test_empty_scripts_skips_lint_and_test(self, tmp_path: Path) -> None:
+        self._with_lockfile(tmp_path, {"name": "x", "version": "0.0.0"})
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command is None
+        assert config.test_command is None
+
+    def test_lint_script_without_eslint_config_is_skipped(self, tmp_path: Path) -> None:
+        self._with_lockfile(
+            tmp_path,
+            {"scripts": {"lint": "eslint ."}},
+        )
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command is None
+
+    def test_lint_script_with_eslint_config_file_is_kept(self, tmp_path: Path) -> None:
+        self._with_lockfile(tmp_path, {"scripts": {"lint": "eslint ."}})
+        (tmp_path / "eslint.config.js").touch()
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command == ("npm", "run", "lint")
+
+    def test_lint_script_with_legacy_eslintrc_is_kept(self, tmp_path: Path) -> None:
+        self._with_lockfile(tmp_path, {"scripts": {"lint": "eslint ."}})
+        (tmp_path / ".eslintrc.json").touch()
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command == ("npm", "run", "lint")
+
+    def test_lint_script_with_package_json_eslint_config_is_kept(self, tmp_path: Path) -> None:
+        self._with_lockfile(
+            tmp_path,
+            {
+                "scripts": {"lint": "eslint ."},
+                "eslintConfig": {"root": True},
+            },
+        )
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command == ("npm", "run", "lint")
+
+    def test_biome_lint_without_config_is_skipped(self, tmp_path: Path) -> None:
+        self._with_lockfile(tmp_path, {"scripts": {"lint": "biome check ."}})
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command is None
+
+    def test_biome_lint_with_config_is_kept(self, tmp_path: Path) -> None:
+        self._with_lockfile(tmp_path, {"scripts": {"lint": "biome check ."}})
+        (tmp_path / "biome.json").touch()
+        config = build_mechanical_config(tmp_path)
+        assert config.lint_command == ("npm", "run", "lint")
+
+    def test_test_script_referencing_vitest_without_dep_is_skipped(self, tmp_path: Path) -> None:
+        self._with_lockfile(tmp_path, {"scripts": {"test": "vitest run"}})
+        config = build_mechanical_config(tmp_path)
+        assert config.test_command is None
+
+    def test_test_script_referencing_vitest_with_dep_is_kept(self, tmp_path: Path) -> None:
+        self._with_lockfile(
+            tmp_path,
+            {
+                "scripts": {"test": "vitest run"},
+                "devDependencies": {"vitest": "^1.0.0"},
+            },
+        )
+        config = build_mechanical_config(tmp_path)
+        assert config.test_command == ("npm", "test")
+
+    def test_test_script_with_npm_stub_is_skipped(self, tmp_path: Path) -> None:
+        self._with_lockfile(
+            tmp_path,
+            {
+                "scripts": {
+                    "test": 'echo "Error: no test specified" && exit 1',
+                },
+            },
+        )
+        config = build_mechanical_config(tmp_path)
+        assert config.test_command is None
+
+    def test_test_script_using_node_test_is_kept(self, tmp_path: Path) -> None:
+        """Native ``node --test`` needs no extra runner dependency."""
+        self._with_lockfile(
+            tmp_path,
+            {"scripts": {"test": "node --test tests/*.test.js"}},
+        )
+        config = build_mechanical_config(tmp_path)
+        assert config.test_command == ("npm", "test")
+
+    def test_jest_without_dep_is_skipped(self, tmp_path: Path) -> None:
+        self._with_lockfile(tmp_path, {"scripts": {"test": "jest"}})
+        config = build_mechanical_config(tmp_path)
+        assert config.test_command is None
+
+    def test_build_script_present_is_kept(self, tmp_path: Path) -> None:
+        self._with_lockfile(tmp_path, {"scripts": {"build": "tsc -p ."}})
+        config = build_mechanical_config(tmp_path)
+        assert config.build_command == ("npm", "run", "build")
+
+    def test_build_falls_back_to_tsc_noemit_when_tsconfig_exists(self, tmp_path: Path) -> None:
+        self._with_lockfile(tmp_path, {"name": "x"})
+        (tmp_path / "tsconfig.json").touch()
+        config = build_mechanical_config(tmp_path)
+        assert config.build_command == ("npx", "--no-install", "tsc", "--noEmit")
+
+    def test_build_skipped_without_script_or_tsconfig(self, tmp_path: Path) -> None:
+        self._with_lockfile(tmp_path, {"name": "x"})
+        config = build_mechanical_config(tmp_path)
+        assert config.build_command is None
+
+    def test_invalid_package_json_preserves_preset(self, tmp_path: Path) -> None:
+        """Malformed ``package.json`` must not crash; keep the raw preset."""
+        (tmp_path / "package.json").write_text("{not valid json")
+        (tmp_path / "package-lock.json").touch()
+        config = build_mechanical_config(tmp_path)
+        # With refinement bypassed, preset commands survive unchanged.
+        assert config.lint_command == ("npm", "run", "lint")
+        assert config.test_command == ("npm", "test")
+        assert config.build_command == ("npm", "run", "build")
+
+    def test_refinement_runs_for_all_node_variants(self, tmp_path: Path) -> None:
+        """pnpm/yarn/bun presets must share the refinement behavior."""
+        cases = [
+            ("pnpm-lock.yaml", "node-pnpm", ("pnpm", "lint"), ("pnpm", "test")),
+            ("yarn.lock", "node-yarn", ("yarn", "lint"), ("yarn", "test")),
+            ("bun.lockb", "node-bun", ("bun", "lint"), ("bun", "test")),
+        ]
+        for lockfile, _name, lint_cmd, test_cmd in cases:
+            d = tmp_path / lockfile.replace(".", "_")
+            d.mkdir()
+            _write_package_json(
+                d,
+                {
+                    "scripts": {"lint": "eslint .", "test": "vitest run"},
+                    "devDependencies": {"vitest": "^1.0.0"},
+                },
+            )
+            (d / lockfile).touch()
+            (d / "eslint.config.js").touch()
+            config = build_mechanical_config(d)
+            assert config.lint_command == lint_cmd, lockfile
+            assert config.test_command == test_cmd, lockfile
+
+    def test_toml_override_still_wins_over_refinement(self, tmp_path: Path) -> None:
+        """``.ouroboros/mechanical.toml`` remains the authoritative escape hatch."""
+        self._with_lockfile(
+            tmp_path,
+            {"scripts": {"test": "vitest run"}},  # no dep -> refinement skips
+        )
+        ouroboros_dir = tmp_path / ".ouroboros"
+        ouroboros_dir.mkdir()
+        (ouroboros_dir / "mechanical.toml").write_text(
+            'test = "node --test tests"\n',
+        )
+        config = build_mechanical_config(tmp_path)
+        assert config.test_command == ("node", "--test", "tests")
 
 
 class TestLanguagePresetCommands:

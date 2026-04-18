@@ -10,8 +10,10 @@ Usage:
 """
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
+import re
 import shlex
 from typing import Any
 
@@ -195,6 +197,183 @@ def _resolve_maven_command(working_dir: Path) -> str:
     return "mvn"
 
 
+_ESLINT_CONFIG_FILES: tuple[str, ...] = (
+    "eslint.config.js",
+    "eslint.config.mjs",
+    "eslint.config.cjs",
+    "eslint.config.ts",
+    ".eslintrc.js",
+    ".eslintrc.cjs",
+    ".eslintrc.json",
+    ".eslintrc.yaml",
+    ".eslintrc.yml",
+    ".eslintrc",
+)
+
+_BIOME_CONFIG_FILES: tuple[str, ...] = ("biome.json", "biome.jsonc")
+
+# Tokens in a `scripts.test` value that indicate a specific runner is expected.
+# When a token is present but its package is not declared in dependencies,
+# the script is considered misconfigured and the test check is skipped.
+_TEST_RUNNER_TOKENS: tuple[tuple[str, str], ...] = (
+    ("vitest", "vitest"),
+    ("jest", "jest"),
+    ("mocha", "mocha"),
+    ("ava", "ava"),
+    ("playwright", "@playwright/test"),
+)
+
+_TEST_RUNNER_TOKEN_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(tok) for tok, _ in _TEST_RUNNER_TOKENS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _read_package_json(working_dir: Path) -> dict[str, Any] | None:
+    """Read and parse ``package.json`` safely.
+
+    Returns None when the file is absent or invalid; never raises.
+    """
+    path = working_dir / "package.json"
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "rb") as handle:
+            data = json.loads(handle.read())
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("node_preset.package_json_parse_error", path=str(path), error=str(exc))
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _has_eslint_config(working_dir: Path, pkg: dict[str, Any]) -> bool:
+    if any((working_dir / name).exists() for name in _ESLINT_CONFIG_FILES):
+        return True
+    return "eslintConfig" in pkg
+
+
+def _has_biome_config(working_dir: Path) -> bool:
+    return any((working_dir / name).exists() for name in _BIOME_CONFIG_FILES)
+
+
+def _declares_dependency(pkg: dict[str, Any], name: str) -> bool:
+    for key in (
+        "dependencies",
+        "devDependencies",
+        "peerDependencies",
+        "optionalDependencies",
+    ):
+        section = pkg.get(key)
+        if isinstance(section, dict) and name in section:
+            return True
+    return False
+
+
+def _refine_node_lint(
+    working_dir: Path,
+    pkg: dict[str, Any],
+    fallback: tuple[str, ...] | None,
+) -> tuple[str, ...] | None:
+    """Return a safe lint command, or None to skip.
+
+    A lint script is only trusted when:
+    - ``scripts.lint`` is defined in package.json, and
+    - the referenced tool (eslint/biome) has a config file available.
+    """
+    scripts = pkg.get("scripts")
+    if not isinstance(scripts, dict):
+        return None
+    lint_script = scripts.get("lint")
+    if not isinstance(lint_script, str) or not lint_script.strip():
+        return None
+    lower = lint_script.lower()
+    if "eslint" in lower and not _has_eslint_config(working_dir, pkg):
+        log.info("node_preset.lint_skipped", reason="eslint_config_missing")
+        return None
+    if "biome" in lower and not _has_biome_config(working_dir):
+        log.info("node_preset.lint_skipped", reason="biome_config_missing")
+        return None
+    return fallback
+
+
+def _refine_node_test(
+    pkg: dict[str, Any],
+    fallback: tuple[str, ...] | None,
+) -> tuple[str, ...] | None:
+    """Return a safe test command, or None to skip.
+
+    A test script is only trusted when:
+    - ``scripts.test`` is defined and is not the npm "no test specified" stub, and
+    - any referenced runner (vitest/jest/mocha/…) is declared in dependencies.
+    """
+    scripts = pkg.get("scripts")
+    if not isinstance(scripts, dict):
+        return None
+    test_script = scripts.get("test")
+    if not isinstance(test_script, str) or not test_script.strip():
+        return None
+    lower = test_script.lower()
+    if "no test specified" in lower:
+        log.info("node_preset.test_skipped", reason="npm_stub")
+        return None
+    for match in _TEST_RUNNER_TOKEN_PATTERN.finditer(test_script):
+        token = match.group(1).lower()
+        for tok, dep_name in _TEST_RUNNER_TOKENS:
+            if tok == token and not _declares_dependency(pkg, dep_name):
+                log.info(
+                    "node_preset.test_skipped",
+                    reason="runner_not_declared",
+                    runner=token,
+                )
+                return None
+    return fallback
+
+
+def _refine_node_build(
+    working_dir: Path,
+    pkg: dict[str, Any],
+    fallback: tuple[str, ...] | None,
+) -> tuple[str, ...] | None:
+    """Return a safe build command, or None to skip.
+
+    Keeps ``scripts.build`` when declared. When no build script is available
+    but a ``tsconfig.json`` is present, falls back to a type-check-only
+    compile via ``npx tsc --noEmit`` so TypeScript projects still get build
+    verification.
+    """
+    scripts = pkg.get("scripts")
+    if isinstance(scripts, dict):
+        build_script = scripts.get("build")
+        if isinstance(build_script, str) and build_script.strip():
+            return fallback
+    if (working_dir / "tsconfig.json").exists():
+        return ("npx", "--no-install", "tsc", "--noEmit")
+    return None
+
+
+def _refine_node_preset(working_dir: Path, preset: LanguagePreset) -> LanguagePreset:
+    """Refine a node-* preset against the actual project manifest.
+
+    Returns a new ``LanguagePreset`` where any command the project cannot
+    reliably execute is replaced with ``None`` (skipped). Stage 1 is meant
+    to be a zero-cost, zero-false-positive sanity gate; it is better to skip
+    a check than to run the wrong tool and report a phantom failure.
+    """
+    pkg = _read_package_json(working_dir)
+    if pkg is None:
+        return preset
+    return LanguagePreset(
+        name=preset.name,
+        lint_command=_refine_node_lint(working_dir, pkg, preset.lint_command),
+        build_command=_refine_node_build(working_dir, pkg, preset.build_command),
+        test_command=_refine_node_test(pkg, preset.test_command),
+        static_command=preset.static_command,
+        coverage_command=preset.coverage_command,
+    )
+
+
 def _load_project_overrides(working_dir: Path) -> dict[str, Any] | None:
     """Load .ouroboros/mechanical.toml if it exists.
 
@@ -356,6 +535,9 @@ def build_mechanical_config(
     """
     # Start with auto-detected preset
     preset = detect_language(working_dir)
+
+    if preset and preset.name.startswith("node-"):
+        preset = _refine_node_preset(working_dir, preset)
 
     build_command = preset.build_command if preset else None
     test_command = preset.test_command if preset else None
