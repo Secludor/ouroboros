@@ -545,15 +545,31 @@ class OrchestratorRunner:
         policy_decisions: tuple[PolicyDecision, ...],
         policy_context: PolicyContext,
     ) -> None:
-        """Persist capability policy decisions for audit/debuggability."""
-        await self._event_store.append(
-            create_policy_capabilities_evaluated_event(
-                session_id=session_id,
-                graph=capability_graph,
-                decisions=policy_decisions,
-                context=policy_context,
+        """Persist capability policy decisions for audit/debuggability.
+
+        Best-effort: the audit record is auxiliary to the orchestration
+        path, not a prerequisite for it.  An event-store failure here
+        must never take down interview/evaluation/execution — we log
+        the failure and continue, so that observability degradation
+        never becomes an availability incident.
+        """
+        try:
+            await self._event_store.append(
+                create_policy_capabilities_evaluated_event(
+                    session_id=session_id,
+                    graph=capability_graph,
+                    decisions=policy_decisions,
+                    context=policy_context,
+                )
             )
-        )
+        except Exception as exc:
+            log.warning(
+                "orchestrator.runner.policy_audit_emit_failed",
+                session_id=session_id,
+                capability_count=len(capability_graph.capabilities),
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
 
     def _seed_runtime_handle(
         self,

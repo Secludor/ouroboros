@@ -2364,6 +2364,39 @@ class TestOrchestratorRunnerWithMCP:
         ]
 
     @pytest.mark.asyncio
+    async def test_policy_audit_emit_failure_does_not_break_orchestration(
+        self,
+        mock_adapter: MagicMock,
+        mock_console: MagicMock,
+    ) -> None:
+        """A failing event store must not take down tool-catalog assembly.
+
+        The policy audit event is auxiliary observability, not a
+        prerequisite for orchestration.  If the event store fails
+        (disk full, DB locked, etc.), the orchestrator must keep
+        producing merged tools and degrade to a logged warning
+        instead of raising into the session flow.
+        """
+        failing_event_store = AsyncMock()
+        failing_event_store.append.side_effect = RuntimeError("event store unavailable")
+
+        runner = OrchestratorRunner(
+            mock_adapter,
+            failing_event_store,
+            mock_console,
+            inherited_tools=["Read"],
+        )
+
+        # Must not raise despite every append() failing.
+        merged_tools, provider, tool_catalog = await runner._get_merged_tools("session_123")
+
+        assert provider is None
+        assert "Read" in merged_tools
+        assert tool_catalog is not None
+        # The failed audit attempt was still made (best-effort, not skipped).
+        assert failing_event_store.append.await_count >= 1
+
+    @pytest.mark.asyncio
     async def test_get_merged_tools_preserves_inherited_capabilities_after_discovery(
         self,
         mock_adapter: MagicMock,
