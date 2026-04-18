@@ -131,6 +131,64 @@ class TestParallelACExecutor:
         assert max_active_count == 1
 
     @pytest.mark.asyncio
+    async def test_control_plane_preserves_parallel_for_read_only_catalog(self) -> None:
+        """Safe read-only tools should keep the default parallel AC fanout.
+
+        Companion regression test for
+        ``test_control_plane_serializes_batch_with_write_capabilities``:
+        a future refactor that accidentally blanket-serializes every
+        batch would quietly remove the intended parallelism and go
+        unnoticed without this guard.
+        """
+        seed = _make_seed("Read parser", "Read formatter")
+        executor = _make_executor()
+        active_count = 0
+        max_active_count = 0
+
+        async def fake_execute_single_ac(**kwargs: Any) -> ACExecutionResult:
+            nonlocal active_count, max_active_count
+            ac_index = int(kwargs["ac_index"])
+            active_count += 1
+            max_active_count = max(max_active_count, active_count)
+            # Both ACs yield before decrementing so the sibling can enter
+            # the critical section.  With serial execution there is only
+            # one in-flight AC at a time and ``max_active_count`` stays
+            # at 1; with parallel execution it reaches 2.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            active_count -= 1
+            return ACExecutionResult(
+                ac_index=ac_index,
+                ac_content=str(kwargs["ac_content"]),
+                success=True,
+                final_message=f"AC {ac_index} complete",
+            )
+
+        with patch.object(executor, "_execute_single_ac", side_effect=fake_execute_single_ac):
+            results = await executor._execute_ac_batch(
+                seed=seed,
+                batch_indices=[0, 1],
+                session_id="sess_control_plane_safe",
+                execution_id="exec_control_plane_safe",
+                tools=["Read", "Grep"],
+                tool_catalog=(
+                    MCPToolDefinition(name="Read", description="Read files"),
+                    MCPToolDefinition(name="Grep", description="Search files"),
+                ),
+                system_prompt="test",
+                level_contexts=[],
+                ac_retry_attempts={0: 0, 1: 0},
+            )
+
+        assert [result.ac_index for result in results if isinstance(result, ACExecutionResult)] == [
+            0,
+            1,
+        ]
+        # Both ACs were in-flight concurrently — the control plane
+        # must NOT degrade safe read-only catalogs to serial execution.
+        assert max_active_count == 2
+
+    @pytest.mark.asyncio
     async def test_atomic_ac_uses_ac_scoped_runtime_handle(self) -> None:
         """Atomic AC execution should seed a fresh AC-scoped runtime handle."""
 
