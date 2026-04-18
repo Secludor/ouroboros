@@ -18,6 +18,7 @@ from ouroboros.orchestrator.mcp_tools import (
     assemble_session_tool_catalog,
     enumerate_runtime_builtin_tool_definitions,
 )
+from ouroboros.sandbox import SandboxClass
 
 
 class PolicySessionRole(StrEnum):
@@ -36,6 +37,12 @@ class PolicyExecutionPhase(StrEnum):
     COORDINATOR_REVIEW = "coordinator_review"
     INTERVIEW = "interview"
     EVALUATION = "evaluation"
+
+
+# ``SandboxClass`` lives in :mod:`ouroboros.sandbox` so provider-side
+# translation tables (``codex_permissions``, ``claude_permissions``) can
+# import it without pulling the orchestrator package's init chain.  We
+# re-export it here so engine callers keep a single import surface.
 
 
 @dataclass(frozen=True, slots=True)
@@ -235,13 +242,39 @@ def allowed_runtime_builtin_tool_names(
     return allowed_capability_names(graph, context)
 
 
+# Session role → backend-neutral sandbox class.
+#
+# Engine-owned: every admitted session role maps to exactly one sandbox class,
+# so the "how much can this role touch the host" question is answered in one
+# place and then translated (not re-decided) by each provider adapter.
+_ROLE_SANDBOX_CLASS: dict[PolicySessionRole, SandboxClass] = {
+    PolicySessionRole.INTERVIEW: SandboxClass.READ_ONLY,
+    PolicySessionRole.EVALUATION: SandboxClass.READ_ONLY,
+    PolicySessionRole.COORDINATOR: SandboxClass.WORKSPACE_WRITE,
+    PolicySessionRole.IMPLEMENTATION: SandboxClass.UNRESTRICTED,
+}
+
+
+def derive_sandbox_class(context: PolicyContext) -> SandboxClass:
+    """Return the backend-neutral sandbox class implied by a policy context.
+
+    This is the engine's authoritative answer to "what sandbox level does
+    this session deserve?".  Provider adapters must translate the returned
+    enum to their runtime-specific shape via a lookup table; they must not
+    recompute the decision from free-form permission strings.
+    """
+    return _ROLE_SANDBOX_CLASS[context.session_role]
+
+
 __all__ = [
     "PolicyContext",
     "PolicyDecision",
     "PolicyExecutionPhase",
     "PolicySessionRole",
     "RoleCapabilityProfile",
+    "SandboxClass",
     "allowed_capability_names",
     "allowed_runtime_builtin_tool_names",
+    "derive_sandbox_class",
     "evaluate_capability_policy",
 ]
