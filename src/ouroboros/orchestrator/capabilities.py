@@ -185,7 +185,11 @@ _BUILTIN_SEMANTICS: dict[str, CapabilitySemantics] = {
     ),
 }
 
-_INHERITED_CAPABILITY_SEMANTICS = CapabilitySemantics(
+# Pessimistic default classification for any capability whose real semantics
+# cannot yet be inferred (inherited delegations, unmapped attached MCP tools).
+# Intentionally EXTERNAL_SIDE_EFFECT + SERIALIZED + ELEVATED so an unknown
+# tool never quietly widens a role envelope.
+_DEFAULT_ATTACHED_SEMANTICS = CapabilitySemantics(
     mutation_class=CapabilityMutationClass.EXTERNAL_SIDE_EFFECT,
     parallel_safety=CapabilityParallelSafety.SERIALIZED,
     interruptibility=CapabilityInterruptibility.SOFT,
@@ -193,17 +197,6 @@ _INHERITED_CAPABILITY_SEMANTICS = CapabilitySemantics(
     origin=CapabilityOrigin.ATTACHED_MCP,
     scope=CapabilityScope.ATTACHMENT,
 )
-
-
-def _default_attached_semantics() -> CapabilitySemantics:
-    return CapabilitySemantics(
-        mutation_class=CapabilityMutationClass.EXTERNAL_SIDE_EFFECT,
-        parallel_safety=CapabilityParallelSafety.SERIALIZED,
-        interruptibility=CapabilityInterruptibility.SOFT,
-        approval_class=CapabilityApprovalClass.ELEVATED,
-        origin=CapabilityOrigin.ATTACHED_MCP,
-        scope=CapabilityScope.ATTACHMENT,
-    )
 
 
 def _fallback_source_metadata(tool: MCPToolDefinition) -> ToolCatalogSourceMetadata:
@@ -253,31 +246,33 @@ def _infer_attached_semantics(tool: MCPToolDefinition) -> CapabilitySemantics:
 def _coerce_capability_semantics(
     raw: Mapping[str, Any],
     *,
-    fallback: CapabilitySemantics | None = None,
-    context: str | None = None,
-) -> CapabilitySemantics:
-    """Build semantics from a raw mapping, treating missing keys as fallback.
+    fallback: CapabilitySemantics,
+    context: str,
+) -> CapabilitySemantics | None:
+    """Merge a raw override mapping onto ``fallback``.
 
-    Any unrecognized enum value raises ``ValueError``; callers that want
-    lenient behavior should catch and log, not silence.
+    Returns ``None`` — and logs a structured warning — when the raw
+    mapping contains an unrecognized enum value.  The caller decides
+    what to do on failure (use fallback, skip the tool, etc.); this
+    function does not raise, so callers do not need to re-wrap it in
+    try/except just to preserve their own control flow.
     """
-    base = fallback or _default_attached_semantics()
     try:
         return CapabilitySemantics(
             mutation_class=CapabilityMutationClass(
-                str(raw.get("mutation_class", base.mutation_class.value))
+                str(raw.get("mutation_class", fallback.mutation_class.value))
             ),
             parallel_safety=CapabilityParallelSafety(
-                str(raw.get("parallel_safety", base.parallel_safety.value))
+                str(raw.get("parallel_safety", fallback.parallel_safety.value))
             ),
             interruptibility=CapabilityInterruptibility(
-                str(raw.get("interruptibility", base.interruptibility.value))
+                str(raw.get("interruptibility", fallback.interruptibility.value))
             ),
             approval_class=CapabilityApprovalClass(
-                str(raw.get("approval_class", base.approval_class.value))
+                str(raw.get("approval_class", fallback.approval_class.value))
             ),
-            origin=CapabilityOrigin(str(raw.get("origin", base.origin.value))),
-            scope=CapabilityScope(str(raw.get("scope", base.scope.value))),
+            origin=CapabilityOrigin(str(raw.get("origin", fallback.origin.value))),
+            scope=CapabilityScope(str(raw.get("scope", fallback.scope.value))),
         )
     except ValueError as exc:
         log.warning(
@@ -285,7 +280,7 @@ def _coerce_capability_semantics(
             context=context,
             error=str(exc),
         )
-        raise
+        return None
 
 
 def _default_tool_capability_override_path() -> Path:
@@ -405,15 +400,13 @@ def _apply_raw_override_to_semantics(
 ) -> CapabilitySemantics:
     """Merge raw override fields onto already-inferred semantics.
 
-    Unlike wholesale replacement, this preserves inferred values for any
-    dimension the user did not explicitly set in their override YAML.  When
-    the override declares an invalid enum value, the inferred semantics are
-    returned unchanged (the warning is logged).
+    Preserves inferred values for any dimension the user did not
+    explicitly set in their override YAML.  Returns inferred unchanged
+    when the override declares an invalid enum value (the warning is
+    logged by ``_coerce_capability_semantics``).
     """
-    try:
-        return _coerce_capability_semantics(raw, fallback=inferred, context=context)
-    except ValueError:
-        return inferred
+    merged = _coerce_capability_semantics(raw, fallback=inferred, context=context)
+    return merged if merged is not None else inferred
 
 
 def _semantics_for_entry(
@@ -511,7 +504,7 @@ def _descriptor_from_inherited_capability(name: str) -> CapabilityDescriptor:
         server_name=None,
         source_kind="inherited_capability",
         source_name="delegated_parent",
-        semantics=_INHERITED_CAPABILITY_SEMANTICS,
+        semantics=_DEFAULT_ATTACHED_SEMANTICS,
     )
 
 
