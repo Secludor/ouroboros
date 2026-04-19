@@ -216,6 +216,7 @@ class TestExecuteSeedHandlerQA:
             fake_exec.summary["verification_report"],
             Path.cwd(),
             llm_adapter=None,
+            llm_backend=None,
         )
         assert qa_args["artifact"] == "Structured verification artifact"
         assert qa_args["reference"] == "Raw verification reference"
@@ -273,6 +274,7 @@ class TestExecuteSeedHandlerQA:
             fake_exec.summary["verification_report"],
             delegated_cwd.resolve(),
             llm_adapter=None,
+            llm_backend=None,
         )
 
     async def test_qa_resolves_relative_seed_project_dir_against_dispatch_cwd(self) -> None:
@@ -325,6 +327,7 @@ class TestExecuteSeedHandlerQA:
             fake_exec.summary["verification_report"],
             (dispatch_cwd / "repo-root").resolve(),
             llm_adapter=None,
+            llm_backend=None,
         )
 
     async def test_skip_qa_bypasses_qa(self) -> None:
