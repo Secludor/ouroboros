@@ -103,13 +103,14 @@ mcp_args:
     assert result.command_prefix == "ooo run"
     assert result.prompt == prompt
     assert result.skill_path == skill_md_path
-    assert result.first_argument == "seed file.yaml"
+    expected_argument = "seed file.yaml --max-iterations 2"
+    assert result.first_argument == expected_argument
     assert result.mcp_tool == "ouroboros_execute_seed"
     assert result.mcp_args == {
-        "seed_path": "seed file.yaml",
+        "seed_path": expected_argument,
         "cwd": str(runtime_cwd),
-        "label": f"cwd={runtime_cwd} seed=seed file.yaml",
-        "nested": {"values": ["seed file.yaml", str(runtime_cwd), True]},
+        "label": f"cwd={runtime_cwd} seed={expected_argument}",
+        "nested": {"values": [expected_argument, str(runtime_cwd), True]},
     }
     assert result.target == MCPDispatchTarget(
         mcp_tool="ouroboros_execute_seed",

@@ -112,13 +112,14 @@ def test_valid_dispatch_inputs_normalize_to_canonical_runtime_metadata(
         )
     )
 
+    expected_argument = "seed file.yaml --max-iterations 2"
     expected_args = {
-        "seed_path": "seed file.yaml",
+        "seed_path": expected_argument,
         "cwd": str(runtime_cwd),
-        "combined": f"cwd={runtime_cwd} seed=seed file.yaml",
+        "combined": f"cwd={runtime_cwd} seed={expected_argument}",
         "nested": {
             "values": [
-                "seed file.yaml",
+                expected_argument,
                 str(runtime_cwd),
                 True,
             ],
@@ -133,7 +134,7 @@ def test_valid_dispatch_inputs_normalize_to_canonical_runtime_metadata(
             skill_path=skill_md_path,
             mcp_tool="ouroboros_execute_seed",
             mcp_args=expected_args,
-            first_argument="seed file.yaml",
+            first_argument=expected_argument,
         ),
     )
     assert result.dispatch_metadata == NormalizedMCPFrontmatter(
@@ -219,10 +220,11 @@ def test_valid_router_dispatch_forms_resolve_expected_parsed_dispatch_fields(
         )
     )
 
+    expected_argument = "forms/alpha seed.yaml --max-iterations 2"
     expected_args = {
-        "seed_path": "forms/alpha seed.yaml",
+        "seed_path": expected_argument,
         "cwd": str(runtime_cwd),
-        "combined": f"cwd={runtime_cwd} seed=forms/alpha seed.yaml",
+        "combined": f"cwd={runtime_cwd} seed={expected_argument}",
     }
     _assert_resolved_payload(
         result,
@@ -233,7 +235,7 @@ def test_valid_router_dispatch_forms_resolve_expected_parsed_dispatch_fields(
             skill_path=skill_md_path,
             mcp_tool="ouroboros_execute_seed",
             mcp_args=expected_args,
-            first_argument="forms/alpha seed.yaml",
+            first_argument=expected_argument,
         ),
     )
     assert result.dispatch_metadata == NormalizedMCPFrontmatter(
