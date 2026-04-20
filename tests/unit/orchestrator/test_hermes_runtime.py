@@ -264,12 +264,13 @@ class TestHermesCliRuntime:
         assert intercept.skill_name == "run"
         assert intercept.command_prefix == "ooo run"
         assert intercept.prompt == prompt
-        assert intercept.first_argument == "seed spec.yaml"
+        expected_argument = "seed spec.yaml --max-iterations 2"
+        assert intercept.first_argument == expected_argument
         assert intercept.mcp_args == {
-            "seed_path": "seed spec.yaml",
+            "seed_path": expected_argument,
             "cwd": "/tmp/project",
-            "label": "cwd=/tmp/project seed=seed spec.yaml",
-            "nested": {"values": ["seed spec.yaml", "/tmp/project"]},
+            "label": f"cwd=/tmp/project seed={expected_argument}",
+            "nested": {"values": [expected_argument, "/tmp/project"]},
         }
         assert messages[-1].content == "Intercepted"
 

@@ -511,12 +511,12 @@ def test_public_router_parses_raw_ooo_input_and_extracts_argument(
     assert result.command_prefix == "ooo run"
     assert result.prompt == prompt
     assert result.skill_path == skill_md_path
-    assert result.first_argument == "seed file.yaml"
+    assert result.first_argument == "seed file.yaml --max-iterations 2"
     assert result.mcp_tool == "ouroboros_execute_seed"
     assert result.mcp_args == {
-        "seed_path": "seed file.yaml",
+        "seed_path": "seed file.yaml --max-iterations 2",
         "cwd": str(runtime_cwd),
-        "summary": f"cwd={runtime_cwd} seed=seed file.yaml",
+        "summary": f"cwd={runtime_cwd} seed=seed file.yaml --max-iterations 2",
     }
 
 
@@ -607,10 +607,13 @@ def test_resolve_parsed_skill_dispatch_returns_canonical_target_for_known_comman
     assert result.command_prefix == "ooo start"
     assert result.prompt == 'ooo start "seed file.yaml" --max-iterations 2'
     assert result.skill_path == skill_md_path
-    assert result.first_argument == "seed file.yaml"
+    assert result.first_argument == "seed file.yaml --max-iterations 2"
     assert result.target == MCPDispatchTarget(
         mcp_tool="ouroboros_execute_seed",
-        mcp_args={"seed_path": "seed file.yaml", "cwd": str(runtime_cwd)},
+        mcp_args={
+            "seed_path": "seed file.yaml --max-iterations 2",
+            "cwd": str(runtime_cwd),
+        },
     )
 
     direct_result = resolve_skill_dispatch(parsed, cwd=runtime_cwd, skills_dir=skills_dir)
@@ -672,7 +675,7 @@ def test_router_resolves_first_positional_argument_template(tmp_path: Path) -> N
     )
 
     assert isinstance(result, Resolved)
-    assert result.mcp_args == {"artifact": "reports/final output.md"}
+    assert result.mcp_args == {"artifact": "reports/final output.md --strict"}
 
 
 def test_router_resolves_working_directory_template_from_request_cwd(

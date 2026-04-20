@@ -258,14 +258,24 @@ def normalize_mcp_frontmatter(
 
 
 def extract_first_argument(remainder: str | None) -> str | None:
-    """Extract the first shell-style argument following a skill command prefix."""
+    """Extract the full argument payload following a skill command prefix.
+
+    The legacy name is preserved for API stability, but the semantics cover the
+    whole remainder: shell-style tokenization is used purely to strip matching
+    quotes and escape sequences, then tokens are rejoined with single spaces so
+    natural-language usage like ``ooo interview add dark mode to settings``
+    yields the full phrase rather than just ``add``. Quoted forms such as
+    ``ooo interview "add dark mode"`` produce the same unquoted result. If
+    shell tokenization fails (unterminated quote), a whitespace split is used
+    as fallback.
+    """
     if remainder is None or not remainder.strip():
         return None
     try:
         parts = shlex.split(remainder)
     except ValueError:
         parts = remainder.split()
-    return parts[0] if parts else None
+    return " ".join(parts) if parts else None
 
 
 def resolve_dispatch_templates(

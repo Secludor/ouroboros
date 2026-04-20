@@ -84,11 +84,12 @@ mcp_args:
         ResolveRequest(prompt=prompt, cwd=runtime_cwd, skills_dir=skills_dir)
     )
 
+    expected_argument = "seeds/alpha seed.yaml --max-iterations 2"
     expected_args = {
-        "seed_path": "seeds/alpha seed.yaml",
+        "seed_path": expected_argument,
         "cwd": str(runtime_cwd),
-        "summary": f"cwd={runtime_cwd} seed=seeds/alpha seed.yaml",
-        "nested": {"values": ["seeds/alpha seed.yaml", str(runtime_cwd), True]},
+        "summary": f"cwd={runtime_cwd} seed={expected_argument}",
+        "nested": {"values": [expected_argument, str(runtime_cwd), True]},
         "static_mode": "deterministic",
     }
     expected_target = MCPDispatchTarget(
@@ -101,7 +102,7 @@ mcp_args:
     assert result.command_prefix == "ooo start"
     assert result.prompt == prompt
     assert result.skill_path == skill_md_path
-    assert result.first_argument == "seeds/alpha seed.yaml"
+    assert result.first_argument == expected_argument
     assert result.mcp_tool == "ouroboros_execute_seed"
     assert result.mcp_args == expected_args
     assert result.target == expected_target
