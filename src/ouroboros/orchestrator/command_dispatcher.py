@@ -68,9 +68,11 @@ class CodexCommandDispatcher:
         if not isinstance(session_id, str) or not session_id.strip():
             return dict(intercept.mcp_args)
 
-        # Preserve original frontmatter args (initial_context, cwd, etc.)
-        # and overlay session_id + answer for the resume turn.
+        # Resume turn: drop initial_context so InterviewHandler branches on
+        # session_id instead of starting a new interview. Other frontmatter
+        # args (cwd, etc.) are preserved.
         arguments: dict[str, Any] = dict(intercept.mcp_args)
+        arguments.pop("initial_context", None)
         arguments["session_id"] = session_id.strip()
         if intercept.first_argument is not None:
             arguments["answer"] = intercept.first_argument

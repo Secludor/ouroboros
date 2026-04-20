@@ -574,7 +574,6 @@ class TestOpenCodeRuntimeSkillDispatch:
         assert request.prompt == "ooo interview prompt-derived-answer"
         fake_handler.handle.assert_awaited_once_with(
             {
-                "initial_context": "resolved-by-router",
                 "session_id": "interview-session",
                 "answer": "resolved-answer",
             }
@@ -582,7 +581,6 @@ class TestOpenCodeRuntimeSkillDispatch:
         mock_exec.assert_not_called()
         assert messages[0].data == {
             "tool_input": {
-                "initial_context": "resolved-by-router",
                 "session_id": "interview-session",
                 "answer": "resolved-answer",
             }
