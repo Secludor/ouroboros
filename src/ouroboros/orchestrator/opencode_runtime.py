@@ -773,7 +773,10 @@ class OpenCodeRuntime:
         if not isinstance(session_id, str) or not session_id.strip():
             return dict(intercept.mcp_args)
 
+        # Resume turn: drop initial_context so InterviewHandler branches on
+        # session_id instead of starting a new interview.
         arguments: dict[str, Any] = dict(intercept.mcp_args)
+        arguments.pop("initial_context", None)
         arguments["session_id"] = session_id.strip()
         if intercept.first_argument is not None:
             arguments["answer"] = intercept.first_argument

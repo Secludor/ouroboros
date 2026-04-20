@@ -676,7 +676,7 @@ class TestHermesCliRuntime:
 
         arguments = runtime._build_tool_arguments(intercept, handle)
 
-        assert arguments["initial_context"] == "Build a REST API"
+        assert "initial_context" not in arguments
         assert arguments["session_id"] == "interview-123"
         assert arguments["answer"] == "Next answer"
 

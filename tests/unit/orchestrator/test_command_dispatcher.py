@@ -179,10 +179,12 @@ class TestCodexCommandDispatcher:
         call_args = fake_server.call_tool.call_args
         assert call_args[0][0] == "ouroboros_interview"
         actual_args = call_args[0][1]
-        # Resume must preserve original frontmatter args AND overlay session_id/answer
+        # Resume must drop initial_context so InterviewHandler branches on
+        # session_id instead of restarting the interview, while preserving
+        # cwd and overlaying session_id + answer.
         assert actual_args["session_id"] == "interview-123"
         assert actual_args["answer"] == "Use PostgreSQL"
-        assert actual_args["initial_context"] == "Use PostgreSQL"
+        assert "initial_context" not in actual_args
         assert "cwd" in actual_args
         mock_exec.assert_not_called()
         assert messages[-1].data["subtype"] == "error"
