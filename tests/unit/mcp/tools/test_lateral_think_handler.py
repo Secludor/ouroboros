@@ -145,6 +145,28 @@ async def test_stagnation_pattern_suggests_persona_when_persona_omitted() -> Non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("persona", ["", "   "])
+async def test_blank_persona_is_invalid(persona: str) -> None:
+    """Blank persona values are invalid rather than treated as omitted."""
+    handler = LateralThinkHandler(
+        agent_runtime_backend="opencode",
+        opencode_mode="subprocess",
+    )
+
+    result = await handler.handle(
+        {
+            "problem_context": "progress is flat",
+            "current_approach": "rerun the same checks",
+            "stagnation_pattern": "no_drift",
+            "persona": persona,
+        }
+    )
+
+    assert result.is_err
+    assert "persona cannot be blank" in str(result.error)
+
+
+@pytest.mark.asyncio
 async def test_stagnation_pattern_excludes_known_failed_personas() -> None:
     """failed_attempts persona names are excluded and unknown values are skipped."""
     handler = LateralThinkHandler(

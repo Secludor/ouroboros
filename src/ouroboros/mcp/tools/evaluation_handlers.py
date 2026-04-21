@@ -1333,7 +1333,17 @@ class LateralThinkHandler:
         # --- Parallel multi-persona dispatch path ---
         explicit_list = arguments.get("personas")
         raw_persona_arg = arguments.get("persona")
-        persona_arg = str(raw_persona_arg).strip() if raw_persona_arg else ""
+        if raw_persona_arg is None:
+            persona_arg = ""
+        else:
+            persona_arg = str(raw_persona_arg).strip()
+            if not persona_arg:
+                return Result.err(
+                    MCPToolError(
+                        "persona cannot be blank",
+                        tool_name="ouroboros_lateral_think",
+                    )
+                )
         dispatch_all = persona_arg == "all"
 
         if explicit_list or dispatch_all:
