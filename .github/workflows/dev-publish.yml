@@ -70,6 +70,18 @@ jobs:
           print(f'Runtime version: {v}')
           assert 'dev' in v or 'unknown' not in v, f'Unexpected version: {v}'
           "
+          # Packaging contract: opencode bridge assets must be reachable via
+          # importlib.resources in the installed wheel. Guards against
+          # regressions where hatch include rules stop shipping non-Python
+          # assets (see PR #462).
+          python -c "
+          from importlib.resources import files
+          root = files('ouroboros.opencode.plugin')
+          required = ['ouroboros-bridge.ts', 'package.json', 'tsconfig.json']
+          missing = [n for n in required if not (root / n).is_file()]
+          assert not missing, f'Missing opencode plugin assets in wheel: {missing}'
+          print('opencode plugin assets present:', required)
+          "
 
       - name: Publish to PyPI
         if: steps.check.outputs.skip == 'false'

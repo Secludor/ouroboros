@@ -52,6 +52,10 @@ version-file = "src/ouroboros/_version.py"
 exclude = [
     "/.smoke-home",
     "**/node_modules",
+    # opencode bridge assets are shipped via force-include below so the
+    # packaging contract is explicit. Exclude them from the `packages=`
+    # sweep to avoid duplicate ZIP local headers (PyPI rejects those).
+    "src/ouroboros/opencode/plugin/**",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -59,6 +63,10 @@ packages = ["src/ouroboros"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "skills" = "ouroboros/skills"
+# Explicit inclusion so `importlib.resources.files("ouroboros.opencode.plugin")`
+# reliably finds ouroboros-bridge.ts / package.json / tsconfig.json in the
+# installed wheel, independent of hatchling's implicit asset handling.
+"src/ouroboros/opencode/plugin" = "ouroboros/opencode/plugin"
 
 [dependency-groups]
 dev = [
