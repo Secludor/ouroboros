@@ -888,7 +888,7 @@ def _cleanup_plugin_artifacts() -> None:
             pass  # best effort
 
 
-def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
+def _setup_opencode(opencode_path: str, mode: str = "plugin") -> bool:
     """Configure Ouroboros for the OpenCode runtime.
 
     mode (mutually exclusive — pick one, run setup twice if you deliberately want both):
@@ -900,6 +900,10 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
     Wiring both at once wastes tokens: an Ouroboros MCP tool called inside a
     subprocess-driven ``opencode run`` would also trigger the globally
     registered plugin, causing duplicate subagent dispatch. Choose one.
+
+    Returns:
+        True when setup completed; False when plugin-mode setup failed before
+        config was persisted.
     """
     if mode not in ("plugin", "subprocess"):
         raise ValueError(f"Invalid opencode mode: {mode!r} (expected 'plugin' or 'subprocess')")
@@ -944,7 +948,7 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
 
         print_success(f"Configured OpenCode subprocess runtime (CLI: {opencode_path})")
         print_info(f"Config saved to: {config_path}")
-        return
+        return True
 
     # mode == "plugin" — install plugin/MCP entries FIRST, only persist config
     # if ALL steps succeed (fail-closed).  Without this, a failed bridge install
@@ -964,10 +968,10 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
             failed.append("plugin entry registration")
         print_error(
             f"Plugin-mode setup incomplete — failed: {', '.join(failed)}. "
-            "Re-run 'ouroboros setup opencode --runtime opencode --opencode-mode plugin' "
+            "Re-run 'ouroboros setup --runtime opencode --opencode-mode plugin' "
             "after fixing the issues above."
         )
-        return
+        return False
 
     # All installs succeeded — now safe to persist config.
     # Plugin mode still needs runtime_backend=opencode so the MCP server's
@@ -993,6 +997,7 @@ def _setup_opencode(opencode_path: str, mode: str = "plugin") -> None:
         yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
 
     print_success("Installed OpenCode bridge plugin and registered MCP entry")
+    return True
 
 
 # ── Brownfield repo helpers ──────────────────────────────────────
@@ -1300,7 +1305,8 @@ def setup(
             if mode not in ("plugin", "subprocess"):
                 print_error(f"Invalid selection: {pick!r}")
                 raise typer.Exit(1)
-        _setup_opencode(opencode_path, mode=mode)
+        if not _setup_opencode(opencode_path, mode=mode):
+            raise typer.Exit(1)
     elif selected in ("hermes", "hermes_cli"):
         hermes_path = available.get("hermes")
         if not hermes_path:
