@@ -1459,7 +1459,17 @@ class LateralThinkHandler:
                     stagnation_pattern,
                     exclude_personas=tuple(excluded_personas),
                 )
-                persona_arg = (suggested or ThinkingPersona.CONTRARIAN).value
+                if suggested is None:
+                    return Result.err(
+                        MCPToolError(
+                            (
+                                "No available lateral thinking persona remains after "
+                                "applying failed_attempts exclusions"
+                            ),
+                            tool_name="ouroboros_lateral_think",
+                        )
+                    )
+                persona_arg = suggested.value
             else:
                 persona_arg = ThinkingPersona.CONTRARIAN.value
 

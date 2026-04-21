@@ -167,8 +167,8 @@ async def test_stagnation_pattern_excludes_known_failed_personas() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stagnation_pattern_falls_back_to_contrarian_when_all_excluded() -> None:
-    """When every suggested persona is excluded, contrarian remains the fallback."""
+async def test_stagnation_pattern_errors_when_all_personas_excluded() -> None:
+    """When every persona is excluded, the handler does not repeat one."""
     handler = LateralThinkHandler(
         agent_runtime_backend="opencode",
         opencode_mode="subprocess",
@@ -189,6 +189,5 @@ async def test_stagnation_pattern_falls_back_to_contrarian_when_all_excluded() -
         }
     )
 
-    assert result.is_ok, result
-    payload = result.unwrap()
-    assert payload.meta.get("persona") == "contrarian"
+    assert result.is_err
+    assert "No available lateral thinking persona remains" in str(result.error)
