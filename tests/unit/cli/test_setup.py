@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from typer.testing import CliRunner
 import yaml
 
 import ouroboros.cli.commands.setup as setup_cmd
@@ -1642,6 +1643,65 @@ class TestOpenCodeSetupConfigYaml:
         result = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         mock_claude.assert_not_called()
         assert result["orchestrator"]["opencode_mode"] == "plugin"
+
+    def test_plugin_setup_failure_returns_false_without_persisting_config(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Plugin setup failure must not be reported as a completed helper run."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        config_path = config_dir / "config.yaml"
+        config_path.write_text("{}", encoding="utf-8")
+
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._install_opencode_bridge_plugin", return_value=False
+            ),
+            patch("ouroboros.cli.commands.setup._ensure_opencode_mcp_entry", return_value=True),
+            patch("ouroboros.cli.commands.setup._ensure_opencode_plugin_entry", return_value=True),
+        ):
+            from ouroboros.cli.commands.setup import _setup_opencode
+
+            assert _setup_opencode("/usr/bin/opencode", mode="plugin") is False
+
+        assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {}
+
+    def test_plugin_setup_failure_exits_before_success_banner(self, tmp_path: Path) -> None:
+        """Top-level setup must propagate plugin setup failure to exit status."""
+        config_dir = tmp_path / ".ouroboros"
+        config_dir.mkdir()
+        (config_dir / "config.yaml").write_text("{}", encoding="utf-8")
+
+        runner = CliRunner()
+        with (
+            patch("pathlib.Path.home", return_value=tmp_path),
+            patch("ouroboros.config.loader.ensure_config_dir", return_value=config_dir),
+            patch(
+                "ouroboros.cli.commands.setup._detect_runtimes",
+                return_value={
+                    "claude": None,
+                    "codex": None,
+                    "opencode": "/usr/bin/opencode",
+                    "hermes": None,
+                },
+            ),
+            patch(
+                "ouroboros.cli.commands.setup._install_opencode_bridge_plugin", return_value=False
+            ),
+            patch("ouroboros.cli.commands.setup._ensure_opencode_mcp_entry", return_value=True),
+            patch("ouroboros.cli.commands.setup._ensure_opencode_plugin_entry", return_value=True),
+        ):
+            result = runner.invoke(
+                setup_cmd.app,
+                ["--runtime", "opencode", "--non-interactive"],
+            )
+
+        assert result.exit_code == 1
+        assert "Plugin-mode setup incomplete" in result.output
+        assert "Setup complete!" not in result.output
 
 
 class TestOpenCodeModePersisted:
