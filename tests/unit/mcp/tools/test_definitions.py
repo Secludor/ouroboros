@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -453,6 +454,42 @@ class TestAsyncJobHandlers:
         handler = StartExecuteSeedHandler()
         assert "ouroboros_ac_tree_hud" in handler.definition.description
         assert "ouroboros_job_wait" not in handler.definition.description
+
+    async def test_start_execute_seed_background_generates_ids_without_session(
+        self,
+    ) -> None:
+        """Background path can generate execution/session IDs before dispatch."""
+
+        class FakeEventStore:
+            async def initialize(self) -> None:
+                return None
+
+        class FakeJobManager:
+            async def start_job(self, *, job_type, initial_message, runner, links):
+                runner.close()
+                return SimpleNamespace(
+                    job_id="job_test",
+                    links=links,
+                    status=SimpleNamespace(value="queued"),
+                    cursor=1,
+                )
+
+        execute_handler = MagicMock()
+        execute_handler.agent_runtime_backend = None
+        execute_handler.llm_backend = None
+        handler = StartExecuteSeedHandler(
+            execute_handler=execute_handler,
+            event_store=FakeEventStore(),
+            job_manager=FakeJobManager(),
+            agent_runtime_backend="codex",
+            opencode_mode=None,
+        )
+
+        result = await handler.handle({"seed_content": "goal: test"})
+
+        assert result.is_ok
+        assert result.value.meta["execution_id"].startswith("exec_")
+        assert result.value.meta["session_id"].startswith("orch_")
 
     def test_job_status_definition_name(self) -> None:
         handler = JobStatusHandler()
