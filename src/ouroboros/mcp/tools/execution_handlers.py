@@ -864,8 +864,6 @@ class StartExecuteSeedHandler:
             # while the receipt advertises an orch_* id the child never sees.
             plugin_session_id = arguments.get("session_id")
             if not plugin_session_id:
-                from uuid import uuid4
-
                 plugin_session_id = f"orch_{uuid4().hex[:12]}"
 
             payload = build_execute_subagent(
