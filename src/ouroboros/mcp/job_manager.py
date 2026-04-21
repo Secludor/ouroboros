@@ -447,14 +447,20 @@ class JobManager:
 
         if snapshot.links.session_id and local_task_cancelled:
             repo = SessionRepository(self._event_store)
-            await repo.mark_cancelled(
+            cancel_result = await repo.mark_cancelled(
                 snapshot.links.session_id,
                 reason="Background job cancelled",
                 cancelled_by="mcp_job_manager",
             )
-            from ouroboros.orchestrator.heartbeat import release as release_session_lock
+            if cancel_result.is_err:
+                await clear_cancellation(snapshot.links.session_id)
+                raise ValueError(
+                    f"Failed to mark linked session cancelled: {cancel_result.error.message}"
+                )
 
-            release_session_lock(snapshot.links.session_id)
+            from ouroboros.orchestrator.heartbeat import release_if_owned_by_current_process
+
+            release_if_owned_by_current_process(snapshot.links.session_id)
             if snapshot.links.execution_id:
                 await self._event_store.append(
                     create_execution_terminal_event(

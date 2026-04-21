@@ -10,6 +10,8 @@ import pytest
 
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator.heartbeat import acquire as acquire_session_lock
+from ouroboros.orchestrator.heartbeat import is_holder_alive
 from ouroboros.orchestrator.runner import clear_cancellation, is_cancellation_requested
 from ouroboros.persistence.event_store import EventStore
 
@@ -23,6 +25,7 @@ async def test_cancel_job_terminates_linked_session_subprocess(tmp_path: Path) -
     """Cancelling a linked session job must cancel its runner and child process."""
     session_id = "orch_cancel_123"
     await clear_cancellation(session_id)
+    acquire_session_lock(session_id)
     store = _build_store(tmp_path)
     manager = JobManager(store)
     process_started = asyncio.Event()
@@ -79,6 +82,7 @@ async def test_cancel_job_terminates_linked_session_subprocess(tmp_path: Path) -
         assert cancellation_events
         assert terminal_events
         assert terminal_events[0].data["status"] == "cancelled"
+        assert is_holder_alive(session_id) is False
         assert await is_cancellation_requested(session_id) is False
     finally:
         process = process_holder.get("process")
