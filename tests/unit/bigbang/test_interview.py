@@ -7,10 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from ouroboros.bigbang.interview import (
+    INITIAL_CONTEXT_SUMMARY_QUESTION,
     InterviewEngine,
     InterviewRound,
     InterviewState,
     InterviewStatus,
+    prompt_safe_initial_context,
 )
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.types import Result
@@ -414,7 +416,7 @@ class TestInterviewEngineAskNextQuestion:
         result = await engine.ask_next_question(state)
 
         assert result.is_ok
-        assert "too long to safely send" in result.value
+        assert result.value == INITIAL_CONTEXT_SUMMARY_QUESTION
         mock_adapter.complete.assert_not_called()
 
     @pytest.mark.asyncio
@@ -427,6 +429,22 @@ class TestInterviewEngineAskNextQuestion:
 
         assert result.is_ok
         assert result.value.initial_context.endswith("TAIL_MARKER")
+
+    def test_prompt_safe_initial_context_uses_summary_round(self) -> None:
+        """Shared prompt-safe context helper uses the recorded user summary."""
+        state = InterviewState(
+            interview_id="test_summary_context",
+            initial_context=("A" * 4_000) + "TAIL_MARKER",
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Short project summary",
+            )
+        )
+
+        assert prompt_safe_initial_context(state) == "Short project summary"
 
     @pytest.mark.asyncio
     async def test_long_history_stays_under_total_prompt_cap(self) -> None:

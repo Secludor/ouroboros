@@ -13,7 +13,11 @@ from ouroboros.bigbang.ambiguity import (
     ComponentScore,
     ScoreBreakdown,
 )
-from ouroboros.bigbang.interview import InterviewRound, InterviewState
+from ouroboros.bigbang.interview import (
+    INITIAL_CONTEXT_SUMMARY_QUESTION,
+    InterviewRound,
+    InterviewState,
+)
 from ouroboros.bigbang.seed_generator import (
     SeedGenerator,
     load_seed,
@@ -449,6 +453,31 @@ class TestSeedGeneratorMetadata:
             assert seed.metadata.version == "1.0.0"
             assert seed.metadata.seed_id.startswith("seed_")
             assert seed.metadata.created_at is not None
+
+
+class TestSeedGeneratorInterviewContext:
+    """Test SeedGenerator._build_interview_context."""
+
+    def test_context_uses_prompt_safe_initial_context_summary(self) -> None:
+        """_build_interview_context avoids oversized raw initial_context."""
+        mock_adapter = AsyncMock()
+        generator = SeedGenerator(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_large_context",
+            initial_context=("A" * 4_000) + "TAIL_MARKER",
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Short project summary",
+            )
+        )
+
+        context = generator._build_interview_context(state)
+
+        assert "Short project summary" in context
+        assert "TAIL_MARKER" not in context
 
 
 class TestSeedGeneratorErrorHandling:

@@ -22,7 +22,11 @@ from ouroboros.bigbang.ambiguity import (
     get_next_milestone,
     is_ready_for_seed,
 )
-from ouroboros.bigbang.interview import InterviewRound, InterviewState
+from ouroboros.bigbang.interview import (
+    INITIAL_CONTEXT_SUMMARY_QUESTION,
+    InterviewRound,
+    InterviewState,
+)
 from ouroboros.config.loader import get_clarification_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
@@ -614,6 +618,27 @@ class TestAmbiguityScorerBuildInterviewContext:
         assert "A: Answer 1" in context
         assert "Q: Question 2?" in context
         assert "A: Answer 2" in context
+
+    def test_context_uses_prompt_safe_initial_context_summary(self) -> None:
+        """_build_interview_context avoids oversized raw initial_context."""
+        mock_adapter = MagicMock()
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_large_context",
+            initial_context=("A" * 4_000) + "TAIL_MARKER",
+        )
+        state.rounds.append(
+            InterviewRound(
+                round_number=1,
+                question=INITIAL_CONTEXT_SUMMARY_QUESTION,
+                user_response="Short project summary",
+            )
+        )
+
+        context = scorer._build_interview_context(state)
+
+        assert "Short project summary" in context
+        assert "TAIL_MARKER" not in context
 
 
 class TestAmbiguityScorerParseResponse:
