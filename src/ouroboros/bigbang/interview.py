@@ -37,6 +37,18 @@ DEFAULT_INTERVIEW_ROUNDS = 10  # Reference value for prompts (not enforced)
 
 # Legacy alias for backward compatibility
 MAX_INTERVIEW_ROUNDS = DEFAULT_INTERVIEW_ROUNDS
+MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS = 3500
+INITIAL_CONTEXT_SUMMARY_QUESTION = (
+    "Your saved initial context is too long to safely send to the interview "
+    "model without risking CLI prompt failure. Please reply with a concise "
+    "summary of the full context, including goals, constraints, and success "
+    "criteria. I will use that summary for the next interview question."
+)
+INITIAL_CONTEXT_SUMMARY_REQUIRED = (
+    "[Initial context exceeds the prompt-safe size and no user summary has been "
+    "recorded yet. Ask the user to provide a concise summary before scoring or "
+    "generating a seed.]"
+)
 
 
 class InterviewPerspective(StrEnum):
@@ -194,6 +206,16 @@ class InterviewState(BaseModel):
         self.mark_updated()
 
 
+def prompt_safe_initial_context(state: InterviewState) -> str:
+    """Return initial context safe for LLM prompts across interview consumers."""
+    if len(state.initial_context) <= MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS:
+        return state.initial_context
+    for round_data in reversed(state.rounds):
+        if round_data.question == INITIAL_CONTEXT_SUMMARY_QUESTION and round_data.user_response:
+            return round_data.user_response
+    return INITIAL_CONTEXT_SUMMARY_REQUIRED
+
+
 @dataclass
 class InterviewEngine:
     """Engine for conducting interactive requirement interviews.
@@ -239,13 +261,8 @@ class InterviewEngine:
     _MAX_SYSTEM_PROMPT_CHARS = 3500
     _MIN_SYSTEM_PROMPT_CHARS = 1200
     _MAX_INITIAL_CONTEXT_SYSTEM_CHARS = 1800
-    _MAX_INITIAL_CONTEXT_TOTAL_CHARS = 3500
-    _INITIAL_CONTEXT_SUMMARY_QUESTION = (
-        "Your saved initial context is too long to safely send to the interview "
-        "model without risking CLI prompt failure. Please reply with a concise "
-        "summary of the full context, including goals, constraints, and success "
-        "criteria. I will use that summary for the next interview question."
-    )
+    _MAX_INITIAL_CONTEXT_TOTAL_CHARS = MAX_PROMPT_SAFE_INITIAL_CONTEXT_CHARS
+    _INITIAL_CONTEXT_SUMMARY_QUESTION = INITIAL_CONTEXT_SUMMARY_QUESTION
 
     def __post_init__(self) -> None:
         """Ensure state directory exists."""
@@ -663,15 +680,10 @@ class InterviewEngine:
 
     def _effective_initial_context(self, state: InterviewState) -> str | None:
         """Return prompt-safe initial context, or None when a summary is needed."""
-        if len(state.initial_context) <= self._MAX_INITIAL_CONTEXT_TOTAL_CHARS:
-            return state.initial_context
-        for round_data in reversed(state.rounds):
-            if (
-                round_data.question == self._INITIAL_CONTEXT_SUMMARY_QUESTION
-                and round_data.user_response
-            ):
-                return round_data.user_response
-        return None
+        context = prompt_safe_initial_context(state)
+        if context == INITIAL_CONTEXT_SUMMARY_REQUIRED:
+            return None
+        return context
 
     def _build_ambiguity_snapshot_prompt(self, state: InterviewState) -> str:
         """Build prompt context from the latest ambiguity snapshot."""

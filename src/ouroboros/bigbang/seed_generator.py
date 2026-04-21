@@ -20,7 +20,7 @@ import structlog
 import yaml
 
 from ouroboros.bigbang.ambiguity import AMBIGUITY_THRESHOLD, AmbiguityScore
-from ouroboros.bigbang.interview import InterviewState
+from ouroboros.bigbang.interview import InterviewState, prompt_safe_initial_context
 from ouroboros.config import get_clarification_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
@@ -412,7 +412,7 @@ PROJECT_TYPE: greenfield"""
         Returns:
             Formatted context string.
         """
-        parts = [f"Initial Context: {state.initial_context}"]
+        parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
 
         for round_data in state.rounds:
             parts.append(f"\nQ: {round_data.question}")

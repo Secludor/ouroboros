@@ -18,7 +18,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 import structlog
 
-from ouroboros.bigbang.interview import InterviewState
+from ouroboros.bigbang.interview import InterviewState, prompt_safe_initial_context
 from ouroboros.config import get_clarification_model
 from ouroboros.core.errors import ProviderError
 from ouroboros.core.types import Result
@@ -463,7 +463,7 @@ class AmbiguityScorer:
         Returns:
             Formatted context string.
         """
-        parts = [f"Initial Context: {state.initial_context}"]
+        parts = [f"Initial Context: {prompt_safe_initial_context(state)}"]
 
         for round_data in state.rounds:
             parts.append(f"\nQ: {round_data.question}")
