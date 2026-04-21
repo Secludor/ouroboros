@@ -13,7 +13,7 @@ from uuid import uuid4
 from ouroboros.events.base import BaseEvent
 from ouroboros.orchestrator.events import create_execution_terminal_event
 from ouroboros.orchestrator.runner import clear_cancellation, request_cancellation
-from ouroboros.orchestrator.session import SessionRepository
+from ouroboros.orchestrator.session import SessionRepository, SessionStatus
 from ouroboros.persistence.event_store import EventStore
 
 
@@ -430,6 +430,35 @@ class JobManager:
         if snapshot.is_terminal:
             return snapshot
 
+        linked_session_repo: SessionRepository | None = None
+        if snapshot.links.session_id:
+            linked_session_repo = SessionRepository(self._event_store)
+            session_result = await linked_session_repo.reconstruct_session(
+                snapshot.links.session_id
+            )
+            terminal_events = await self._event_store.query_events(
+                aggregate_id=snapshot.links.session_id,
+                limit=10,
+            )
+            if (
+                session_result.is_ok
+                and session_result.value.status
+                in {
+                    SessionStatus.COMPLETED,
+                    SessionStatus.FAILED,
+                    SessionStatus.CANCELLED,
+                }
+            ) or any(
+                event.type
+                in {
+                    "orchestrator.session.completed",
+                    "orchestrator.session.failed",
+                    "orchestrator.session.cancelled",
+                }
+                for event in terminal_events
+            ):
+                return snapshot
+
         await self.update_status(job_id, JobStatus.CANCEL_REQUESTED, "Cancellation requested")
 
         local_task_cancelled = False
@@ -446,7 +475,7 @@ class JobManager:
             await request_cancellation(snapshot.links.session_id)
 
         if snapshot.links.session_id and local_task_cancelled:
-            repo = SessionRepository(self._event_store)
+            repo = linked_session_repo or SessionRepository(self._event_store)
             cancel_result = await repo.mark_cancelled(
                 snapshot.links.session_id,
                 reason="Background job cancelled",

@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 from ouroboros.core.types import Result
 from ouroboros.mcp.job_manager import JobLinks, JobManager, JobStatus
 from ouroboros.mcp.types import ContentType, MCPContentItem, MCPToolResult
+from ouroboros.orchestrator.session import SessionRepository
 from ouroboros.persistence.event_store import EventStore, PersistenceError
 
 
@@ -158,6 +159,45 @@ class TestJobManager:
             assert not session_cancelled
             assert not any(event.data.get("status") == "cancelled" for event in execution_cancelled)
         finally:
+            await store.close()
+
+    async def test_cancel_job_skips_linked_session_already_terminal(self, tmp_path) -> None:
+        store = _build_store(tmp_path)
+        manager = JobManager(store)
+
+        try:
+
+            async def _runner() -> MCPToolResult:
+                await asyncio.sleep(10)
+                return MCPToolResult(
+                    content=(MCPContentItem(type=ContentType.TEXT, text="late"),),
+                    is_error=False,
+                )
+
+            started = await manager.start_job(
+                job_type="terminal-session-race",
+                initial_message="queued",
+                runner=_runner(),
+                links=JobLinks(session_id="orch_terminal_123", execution_id="exec_terminal_123"),
+            )
+            repo = SessionRepository(store)
+            mark_result = await repo.mark_completed("orch_terminal_123")
+            assert mark_result.is_ok
+
+            await manager.cancel_job(started.job_id)
+            session_cancelled = await store.query_events(
+                aggregate_id="orch_terminal_123",
+                event_type="orchestrator.session.cancelled",
+            )
+            execution_cancelled = await store.query_events(
+                aggregate_id="exec_terminal_123",
+                event_type="execution.terminal",
+            )
+
+            assert not session_cancelled
+            assert not any(event.data.get("status") == "cancelled" for event in execution_cancelled)
+        finally:
+            await _cancel_manager_tasks(manager)
             await store.close()
 
     async def test_cancel_job_errors_when_linked_session_cancel_persist_fails(
