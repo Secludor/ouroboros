@@ -407,6 +407,22 @@ class TestAmbiguityScorerScore:
         # Should have retried 3 times
         assert mock_adapter.complete.call_count == 3
 
+    async def test_score_requires_summary_for_large_initial_context(self) -> None:
+        """score fails explicitly when long initial_context has no summary."""
+        mock_adapter = MagicMock()
+        mock_adapter.complete = AsyncMock()
+        scorer = AmbiguityScorer(llm_adapter=mock_adapter)
+        state = InterviewState(
+            interview_id="test_large_context",
+            initial_context=("A" * 4_000) + "TAIL_MARKER",
+        )
+
+        result = await scorer.score(state)
+
+        assert result.is_err
+        assert "summary required" in result.error.message
+        mock_adapter.complete.assert_not_called()
+
     async def test_score_provider_error_recovers_on_retry(self) -> None:
         """score recovers when provider error is transient."""
         mock_adapter = MagicMock()

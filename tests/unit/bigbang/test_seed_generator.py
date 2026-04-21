@@ -261,6 +261,23 @@ class TestSeedGeneratorAmbiguityGating:
             assert result.is_ok
             assert isinstance(result.value, Seed)
 
+    @pytest.mark.asyncio
+    async def test_generate_requires_summary_for_large_initial_context(self) -> None:
+        """SeedGenerator.generate() fails when long initial_context has no summary."""
+        mock_adapter = AsyncMock()
+        state = InterviewState(
+            interview_id="test_large_context",
+            initial_context=("A" * 4_000) + "TAIL_MARKER",
+        )
+        low_ambiguity = create_low_ambiguity_score()
+        generator = SeedGenerator(llm_adapter=mock_adapter)
+
+        result = await generator.generate(state, low_ambiguity)
+
+        assert result.is_err
+        assert isinstance(result.error, ValidationError)
+        assert "summary required" in result.error.message
+
 
 class TestSeedGeneratorExtraction:
     """Test SeedGenerator requirement extraction."""

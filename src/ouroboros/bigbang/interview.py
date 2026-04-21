@@ -216,6 +216,11 @@ def prompt_safe_initial_context(state: InterviewState) -> str:
     return INITIAL_CONTEXT_SUMMARY_REQUIRED
 
 
+def initial_context_summary_missing(state: InterviewState) -> bool:
+    """Return True when a long initial context still needs a user summary."""
+    return prompt_safe_initial_context(state) == INITIAL_CONTEXT_SUMMARY_REQUIRED
+
+
 @dataclass
 class InterviewEngine:
     """Engine for conducting interactive requirement interviews.
