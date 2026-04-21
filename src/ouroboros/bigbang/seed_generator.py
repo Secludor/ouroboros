@@ -20,7 +20,11 @@ import structlog
 import yaml
 
 from ouroboros.bigbang.ambiguity import AMBIGUITY_THRESHOLD, AmbiguityScore
-from ouroboros.bigbang.interview import InterviewState, prompt_safe_initial_context
+from ouroboros.bigbang.interview import (
+    InterviewState,
+    initial_context_summary_missing,
+    prompt_safe_initial_context,
+)
 from ouroboros.config import get_clarification_model
 from ouroboros.core.errors import ProviderError, ValidationError
 from ouroboros.core.seed import (
@@ -129,6 +133,15 @@ class SeedGenerator:
                         "threshold": AMBIGUITY_THRESHOLD,
                         "interview_id": state.interview_id,
                     },
+                )
+            )
+
+        if initial_context_summary_missing(state):
+            return Result.err(
+                ValidationError(
+                    "Initial context summary required before seed generation",
+                    field="initial_context",
+                    details={"interview_id": state.interview_id},
                 )
             )
 
